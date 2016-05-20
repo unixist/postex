@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"flag"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -11,6 +12,13 @@ import (
 	"time"
 
 	ps "github.com/unixist/go-ps"
+)
+
+var (
+	do_gatt      = flag.Bool("gatt", false, "Get all the things")
+	do_container = flag.Bool("container", false, "Detect if we're in a container")
+	do_pkeys     = flag.Bool("pkeys", false, "Detect private keys")
+	pkeyDirs     = flag.String("keyDirs", "/root,/home", "Comma-separated dirs to search for private keys")
 )
 
 type privateKey struct {
@@ -25,7 +33,6 @@ func getPrivateKey(path string) privateKey {
 		return p
 	}
 	defer f.Close()
-
 	head := make([]byte, 32)
 	_, err = f.Read(head)
 	if err != nil {
@@ -47,7 +54,7 @@ func getPrivateKey(path string) privateKey {
 	return p
 }
 
-// sshKeys looks for readable ssh private keys.	Optionally sleep for `sleep`
+// sshKeys looks for readable ssh private keys. Optionally sleep for `sleep`
 // milliseconds to evade detection.
 func sshKeys(dir string, sleep int) []privateKey {
 	pkeys := []privateKey{}
@@ -94,10 +101,16 @@ func isContainer() bool {
 	return false
 }
 func main() {
-	container := isContainer()
-	fmt.Printf("isContainer: %v\n", container)
-	fmt.Printf("ssh keys:\n")
-	for _, pkey := range sshKeys("/", 0) {
-		fmt.Printf("\t%v\n", pkey)
+	flag.Parse()
+	if *do_gatt || *do_container {
+		fmt.Printf("isContainer: %v\n", isContainer())
+	}
+	if *do_gatt || *do_pkeys {
+		fmt.Printf("ssh keys:\n")
+		for _, dir := range strings.Split(*pkeyDirs, ",") {
+			for _, pkey := range sshKeys(dir, 0) {
+				fmt.Printf("\tfile=%v encrypted=%v\n", pkey.path, pkey.encrypted)
+			}
+		}
 	}
 }
