@@ -29,6 +29,7 @@ type privateKey struct {
 func getPrivateKey(path string) privateKey {
 	p := privateKey{}
 	f, err := os.Open(path)
+	// If we don't have permission to open the file, skip it.
 	if err != nil {
 		return p
 	}
@@ -59,7 +60,7 @@ func getPrivateKey(path string) privateKey {
 func sshKeys(dir string, sleep int) []privateKey {
 	pkeys := []privateKey{}
 	filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
-		if info == nil || info.IsDir() {
+		if !info.Mode().IsRegular() {
 			return nil
 		}
 		pkey := getPrivateKey(path)
