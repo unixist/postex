@@ -18,7 +18,8 @@ var (
 	do_gatt      = flag.Bool("gatt", false, "Get all the things")
 	do_container = flag.Bool("container", false, "Detect if we're in a container")
 	do_pkeys     = flag.Bool("pkeys", false, "Detect private keys")
-	pkeyDirs     = flag.String("keyDirs", "/root,/home", "Comma-separated dirs to search for private keys")
+	pkeyDirs     = flag.String("pkeyDirs", "/root,/home", "Comma-separated dirs to search for private keys. Requires --pkeyDirs.")
+	pkeySleep    = flag.Int("pkeySleep", 0, "Length of time in milliseconds to sleep between examining files. Requires --pkeyDirs.")
 )
 
 type privateKey struct {
@@ -60,7 +61,10 @@ func getPrivateKey(path string) privateKey {
 func sshKeys(dir string, sleep int) []privateKey {
 	pkeys := []privateKey{}
 	filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
-		if !info.Mode().IsRegular() {
+		if sleep != 0 {
+			time.Sleep(time.Duration(sleep) * time.Millisecond)
+		}
+		if info == nil || !info.Mode().IsRegular() {
 			return nil
 		}
 		pkey := getPrivateKey(path)
@@ -69,9 +73,6 @@ func sshKeys(dir string, sleep int) []privateKey {
 		}
 		return nil
 	})
-	if sleep != 0 {
-		time.Sleep(time.Duration(sleep) * time.Millisecond)
-	}
 	return pkeys
 }
 
@@ -107,11 +108,12 @@ func main() {
 		fmt.Printf("isContainer: %v\n", isContainer())
 	}
 	if *do_gatt || *do_pkeys {
-		fmt.Printf("ssh keys:\n")
+		fmt.Printf("ssh keys:")
 		for _, dir := range strings.Split(*pkeyDirs, ",") {
-			for _, pkey := range sshKeys(dir, 0) {
-				fmt.Printf("\tfile=%v encrypted=%v\n", pkey.path, pkey.encrypted)
+			for _, pkey := range sshKeys(dir, *pkeySleep) {
+				fmt.Printf("\n\tfile=%v encrypted=%v", pkey.path, pkey.encrypted)
 			}
 		}
+		fmt.Println("")
 	}
 }
