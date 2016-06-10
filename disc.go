@@ -11,29 +11,30 @@ import (
 	"strings"
 	"time"
 
+	netstat "github.com/drael/GOnetstat"
 	ps "github.com/unixist/go-ps"
 )
 
+// CLI flags
 var (
-	// CLI flags
+	// Recon
 	do_gatt      = flag.Bool("gatt", false, "Get all the things")
-	do_container = flag.Bool("container", false, "Detect if we're in a container")
 	do_pkeys     = flag.Bool("pkeys", false, "Detect private keys")
-	do_av        = flag.Bool("av", false, "Check for signs of A/V services running or present")
 	pkeyDirs     = flag.String("pkeyDirs", "/root,/home", "Comma-separated dirs to search for private keys. Requires --pkeyDirs.")
 	pkeySleep    = flag.Int("pkeySleep", 0, "Length of time in milliseconds to sleep between examining files. Requires --pkeyDirs.")
+	do_av        = flag.Bool("av", false, "Check for signs of A/V services running or present.")
+	do_container = flag.Bool("container", false, "Detect if this system is running in a container.")
+	do_net       = flag.Bool("net", false, "Grab IPv4 and IPv6 networking connections.")
 
-	//// Global config
-	// AV systems we can detect
+	// Recon over time
+	do_pollNet   = flag.Bool("pollnet", false, "Long poll for networking connections and a) output a summary; or b) output regular connection status.")
+	do_pollUsers = flag.Bool("pollusers", false, "Long poll for users that log into the system.")
+)
+
+// Antivirus systems we detect
+var (
 	AVSystems = []AVDiscoverer{
 		OSSECAV{name: "OSSEC"},
-	}
-	// AV system processes that indicate presence
-	AVSystemProcs = map[string][]string{
-		"OSSEC": []string{
-			"ossec-agentd",
-			"ossec-syscheckd",
-		},
 	}
 )
 
@@ -47,27 +48,24 @@ type process struct {
 	name string
 }
 
-// AV object holds the AV system name and
 type OSSECAV struct {
 	AVDiscoverer
-	// name of the AV system
 	name string
 }
 
+type SophosAV struct {
+	AVDiscoverer
+	name string
+}
+
+// Each AV system implements this interface.
 type AVDiscoverer interface {
+	// Filesystem paths of binaries related to the detected system
 	Paths() []string
+	// Running processes related to the detected system
 	Procs() []process
+	// Name of the AV system
 	Name() string
-}
-
-// AVResult holds information about AV systems present and/or running.
-type AVResult struct {
-	// Name of the detected AV system
-	name string
-	// filesystem paths of binaries related to the detected system
-	paths []string
-	// running processes related to the detected system
-	procs []string
 }
 
 func (o OSSECAV) Paths() []string {
@@ -83,7 +81,24 @@ func (o OSSECAV) Paths() []string {
 	return found
 }
 func (o OSSECAV) Procs() []process {
-	return nil
+	oprocs := []string{
+		"ossec-agentd",
+		"ossec-syscheckd",
+	}
+	allProcs, _ := ps.Processes()
+	found := []process{}
+	for _, aproc := range allProcs {
+		procName := aproc.Executable()
+		for _, oproc := range oprocs {
+			if oproc == procName {
+				found = append(found, process{
+					pid:  aproc.Pid(),
+					name: procName,
+				})
+			}
+		}
+	}
+	return found
 }
 func (o OSSECAV) Name() string {
 	return o.name
@@ -174,8 +189,7 @@ func getAV() []AVDiscoverer {
 }
 
 // TODO:
-// OSSEC process: ossec-agentd,ossec-syscheckd; OR just check for processes starting with "ossec-"?
-// Sophos process: sav-scan(?)
+// AV: Sophos process: sav-scan(?)
 func main() {
 	flag.Parse()
 	if *do_gatt || *do_container {
@@ -192,12 +206,37 @@ func main() {
 	}
 	if *do_av {
 		fmt.Printf("AV:")
-		for _, av := range getAV() {
+		for _, av := range AVSystems {
 			name, paths, procs := av.Name(), av.Paths(), av.Procs()
 			if len(paths) > 0 || len(procs) > 0 {
 				fmt.Printf("\n\tname=%s files=%v procs=%v", name, paths, procs)
 			}
 		}
 		fmt.Println("")
+	}
+	if *do_net {
+		fmt.Printf("ipv4 connections:")
+		for _, conn := range netstat.Tcp() {
+			if conn.State == "ESTABLISHED" {
+				fmt.Printf("\n\t tcp4: %s:%d <> %s:%d", conn.Ip, conn.Port, conn.ForeignIp, conn.ForeignPort)
+			}
+		}
+		for _, conn := range netstat.Udp() {
+			if conn.State == "ESTABLISHED" {
+				fmt.Printf("\n\t udp4: %s:%d <> %s:%d", conn.Ip, conn.Port, conn.ForeignIp, conn.ForeignPort)
+			}
+		}
+
+		fmt.Printf("ipv6 connections:")
+		for _, conn := range netstat.Tcp6() {
+			if conn.State == "ESTABLISHED" {
+				fmt.Printf("\n\t tcp6: %s:%d <> %s:%d", conn.Ip, conn.Port, conn.ForeignIp, conn.ForeignPort)
+			}
+		}
+		for _, conn := range netstat.Udp6() {
+			if conn.State == "ESTABLISHED" {
+				fmt.Printf("\n\t udp6: %s:%d <> %s:%d", conn.Ip, conn.Port, conn.ForeignIp, conn.ForeignPort)
+			}
+		}
 	}
 }
