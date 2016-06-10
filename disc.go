@@ -20,15 +20,15 @@ var (
 	// Recon
 	do_gatt      = flag.Bool("gatt", false, "Get all the things")
 	do_pkeys     = flag.Bool("pkeys", false, "Detect private keys")
-	pkeyDirs     = flag.String("pkeyDirs", "/root,/home", "Comma-separated dirs to search for private keys. Requires --pkeyDirs.")
+	pkeyDirs     = flag.String("pkeyDirs", "/root,/home", "Comma-separated directories to search for private keys. Default is '/root,/home'. Requires --pkeyDirs.")
 	pkeySleep    = flag.Int("pkeySleep", 0, "Length of time in milliseconds to sleep between examining files. Requires --pkeyDirs.")
 	do_av        = flag.Bool("av", false, "Check for signs of A/V services running or present.")
 	do_container = flag.Bool("container", false, "Detect if this system is running in a container.")
 	do_net       = flag.Bool("net", false, "Grab IPv4 and IPv6 networking connections.")
 
 	// Recon over time
-	do_pollNet   = flag.Bool("pollnet", false, "Long poll for networking connections and a) output a summary; or b) output regular connection status.")
-	do_pollUsers = flag.Bool("pollusers", false, "Long poll for users that log into the system.")
+	do_pollNet   = flag.Bool("pollnet", false, "Long poll for networking connections and a) output a summary; or b) output regular connection status. [NOT IMPLEMENTED]")
+	do_pollUsers = flag.Bool("pollusers", false, "Long poll for users that log into the system. [NOT IMPLEMENTED]")
 )
 
 // Antivirus systems we detect
