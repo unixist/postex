@@ -25,6 +25,7 @@ var (
 	do_av        = flag.Bool("av", false, "Check for signs of A/V services running or present.")
 	do_container = flag.Bool("container", false, "Detect if this system is running in a container.")
 	do_net       = flag.Bool("net", false, "Grab IPv4 and IPv6 networking connections.")
+	do_watches   = flag.Bool("watches", false, "Grab which files/directories are being watched for modification/access/execution.")
 
 	// Recon over time
 	do_pollNet   = flag.Bool("pollnet", false, "Long poll for networking connections and a) output a summary; or b) output regular connection status. [NOT IMPLEMENTED]")
@@ -36,11 +37,20 @@ var (
 	AVSystems = []AVDiscoverer{
 		OSSECAV{name: "OSSEC"},
 	}
+	AuditdRules = "/etc/audit/audit.rules"
 )
 
 type privateKey struct {
 	path      string
 	encrypted bool
+}
+
+// watch holds the information for which the system is attempting to detect access.
+type watch struct {
+	// Path being watched.
+	path string
+	// Action the watch is looking for, i.e. read/write/execute. For example "wa" would detect file writes or appendages.
+	action string
 }
 
 type process struct {
@@ -188,6 +198,25 @@ func getAV() []AVDiscoverer {
 	return allAV
 }
 
+func getWatches() ([]watch, error) {
+	re := regexp.MustCompile("-w ([^[:space:]]+).* -p ([[:alpha:]]+)")
+	t, err := ioutil.ReadFile(AuditdRules)
+	found := []watch{}
+	if err != nil {
+		return nil, fmt.Errorf("Unable to open %v", AuditdRules)
+	}
+	for _, line := range strings.Split(string(t), "\n") {
+		matches := re.FindStringSubmatch(line)
+		if len(matches) == 3 {
+			found = append(found, watch{
+				path:   matches[1],
+				action: matches[2],
+			})
+		}
+	}
+	return found, nil
+}
+
 // TODO:
 // AV: Sophos process: sav-scan(?)
 func main() {
@@ -204,7 +233,7 @@ func main() {
 		}
 		fmt.Println("")
 	}
-	if *do_av {
+	if *do_gatt || *do_av {
 		fmt.Printf("AV:")
 		for _, av := range AVSystems {
 			name, paths, procs := av.Name(), av.Paths(), av.Procs()
@@ -214,29 +243,44 @@ func main() {
 		}
 		fmt.Println("")
 	}
-	if *do_net {
+	if *do_gatt || *do_net {
 		fmt.Printf("ipv4 connections:")
 		for _, conn := range netstat.Tcp() {
 			if conn.State == "ESTABLISHED" {
 				fmt.Printf("\n\t tcp4: %s:%d <> %s:%d", conn.Ip, conn.Port, conn.ForeignIp, conn.ForeignPort)
 			}
 		}
+		fmt.Println("")
 		for _, conn := range netstat.Udp() {
 			if conn.State == "ESTABLISHED" {
 				fmt.Printf("\n\t udp4: %s:%d <> %s:%d", conn.Ip, conn.Port, conn.ForeignIp, conn.ForeignPort)
 			}
 		}
 
-		fmt.Printf("ipv6 connections:")
+		fmt.Printf("\nipv6 connections:")
 		for _, conn := range netstat.Tcp6() {
 			if conn.State == "ESTABLISHED" {
 				fmt.Printf("\n\t tcp6: %s:%d <> %s:%d", conn.Ip, conn.Port, conn.ForeignIp, conn.ForeignPort)
 			}
 		}
+		fmt.Println("")
 		for _, conn := range netstat.Udp6() {
 			if conn.State == "ESTABLISHED" {
 				fmt.Printf("\n\t udp6: %s:%d <> %s:%d", conn.Ip, conn.Port, conn.ForeignIp, conn.ForeignPort)
 			}
 		}
+		fmt.Println("")
+	}
+	if *do_gatt || *do_watches {
+		fmt.Printf("Watches:")
+		watches, err := getWatches()
+		if err != nil {
+			fmt.Println("Error checking watches: ", err)
+		} else {
+			for _, w := range watches {
+				fmt.Printf("\n\tpath=%v action=%v", w.path, w.action)
+			}
+		}
+		fmt.Println("")
 	}
 }
