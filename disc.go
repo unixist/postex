@@ -36,6 +36,7 @@ var (
 var (
 	AVSystems = []AVDiscoverer{
 		OSSECAV{name: "OSSEC"},
+		SophosAV{name: "Sophos"},
 	}
 	AuditdRules = "/etc/audit/audit.rules"
 )
@@ -57,6 +58,11 @@ type process struct {
 	pid  int
 	name string
 }
+type loadedKernelModule struct {
+	address string
+	size    int
+	name    string
+}
 
 type OSSECAV struct {
 	AVDiscoverer
@@ -68,12 +74,14 @@ type SophosAV struct {
 	name string
 }
 
-// Each AV system implements this interface.
+// Each AV system implements this interface to expose artifacts of the detected system.
 type AVDiscoverer interface {
-	// Filesystem paths of binaries related to the detected system
+	// Filesystem paths of binaries
 	Paths() []string
-	// Running processes related to the detected system
+	// Running processes
 	Procs() []process
+	// Loaded kernel modules
+	KernelModules() []loadedKernelModule
 	// Name of the AV system
 	Name() string
 }
@@ -90,17 +98,50 @@ func (o OSSECAV) Paths() []string {
 	}
 	return found
 }
+
 func (o OSSECAV) Procs() []process {
-	oprocs := []string{
+	return filterRunningProcs([]string{
 		"ossec-agentd",
 		"ossec-syscheckd",
-	}
+	})
+}
+
+// KernelModules returns an empty list as OSSEC doesn't use kernel modules.
+func (o OSSECAV) KernelModules() []loadedKernelModule {
+	return []loadedKernelModule{}
+}
+
+func (o OSSECAV) Name() string {
+	return o.name
+}
+
+func (s SophosAV) Paths() []string {
+	return []string{}
+}
+
+func (s SophosAV) Procs() []process {
+	return filterRunningProcs([]string{
+		"savd",
+		"savscand",
+	})
+}
+
+func (o SophosAV) Name() string {
+	return o.name
+}
+
+func (o SophosAV) KernelModules() []loadedKernelModule {
+	return []loadedKernelModule{}
+}
+
+// filterRunningProcs returns processes
+func filterRunningProcs(procs []string) []process {
 	allProcs, _ := ps.Processes()
 	found := []process{}
 	for _, aproc := range allProcs {
 		procName := aproc.Executable()
-		for _, oproc := range oprocs {
-			if oproc == procName {
+		for _, need := range procs {
+			if need == procName {
 				found = append(found, process{
 					pid:  aproc.Pid(),
 					name: procName,
@@ -110,10 +151,6 @@ func (o OSSECAV) Procs() []process {
 	}
 	return found
 }
-func (o OSSECAV) Name() string {
-	return o.name
-}
-
 func getPrivateKey(path string) privateKey {
 	p := privateKey{}
 	f, err := os.Open(path)
@@ -236,9 +273,9 @@ func main() {
 	if *do_gatt || *do_av {
 		fmt.Printf("AV:")
 		for _, av := range AVSystems {
-			name, paths, procs := av.Name(), av.Paths(), av.Procs()
+			name, paths, procs, mods := av.Name(), av.Paths(), av.Procs(), av.KernelModules()
 			if len(paths) > 0 || len(procs) > 0 {
-				fmt.Printf("\n\tname=%s files=%v procs=%v", name, paths, procs)
+				fmt.Printf("\n\tname=%s files=%v procs=%v, modules=%v", name, paths, procs, mods)
 			}
 		}
 		fmt.Println("")
