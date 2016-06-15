@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	utmp "github.com/EricLagergren/go-gnulib/utmp"
 	netstat "github.com/drael/GOnetstat"
 	ps "github.com/unixist/go-ps"
 	netlink "github.com/vishvananda/netlink"
@@ -28,6 +29,7 @@ var (
 	do_net       = flag.Bool("net", false, "Grab IPv4 and IPv6 networking connections.")
 	do_watches   = flag.Bool("watches", false, "Grab which files/directories are being watched for modification/access/execution.")
 	do_arp       = flag.Bool("arp", false, "Grab ARP table for all devices.")
+	do_who       = flag.Bool("who", false, "List who's logged in and from where.")
 
 	// Recon over time
 	do_pollNet   = flag.Bool("pollnet", false, "Long poll for networking connections and a) output a summary; or b) output regular connection status. [NOT IMPLEMENTED]")
@@ -54,6 +56,11 @@ type watch struct {
 	path string
 	// Action the watch is looking for, i.e. read/write/execute. For example "wa" would detect file writes or appendages.
 	action string
+}
+
+type who struct {
+	user, line, host string
+	pid              int32
 }
 
 type process struct {
@@ -239,6 +246,23 @@ func isContainer() bool {
 	return false
 }
 
+func getWho() []who {
+	found := []who{}
+	utmps, err := utmp.ReadUtmp("/var/run/utmp", utmp.LoginProcess)
+	if err != nil {
+		return found
+	}
+	for _, u := range utmps {
+		found = append(found, who{
+			user: string(u.User[:len(u.User)]),
+			host: string(u.Host[:len(u.Host)]),
+			line: string(u.Line[:len(u.Line)]),
+			pid:  u.Pid,
+		})
+	}
+	return found
+}
+
 func getAV() []AVDiscoverer {
 	allAV := []AVDiscoverer{}
 	for _, av := range AVSystems {
@@ -343,5 +367,12 @@ func main() {
 			}
 			fmt.Println("")
 		}
+	}
+	if *do_gatt || *do_who {
+		fmt.Printf("Logged in:")
+		for _, w := range getWho() {
+			fmt.Printf("\n\tuser=%s host=%s line=%s pid=%d", w.user, w.host, w.line, w.pid)
+		}
+		fmt.Println("")
 	}
 }
