@@ -13,6 +13,7 @@ import (
 
 	netstat "github.com/drael/GOnetstat"
 	ps "github.com/unixist/go-ps"
+	netlink "github.com/vishvananda/netlink"
 )
 
 // CLI flags
@@ -26,6 +27,7 @@ var (
 	do_container = flag.Bool("container", false, "Detect if this system is running in a container.")
 	do_net       = flag.Bool("net", false, "Grab IPv4 and IPv6 networking connections.")
 	do_watches   = flag.Bool("watches", false, "Grab which files/directories are being watched for modification/access/execution.")
+	do_arp       = flag.Bool("arp", false, "Grab ARP table for all devices.")
 
 	// Recon over time
 	do_pollNet   = flag.Bool("pollnet", false, "Long poll for networking connections and a) output a summary; or b) output regular connection status. [NOT IMPLEMENTED]")
@@ -329,5 +331,17 @@ func main() {
 			}
 		}
 		fmt.Println("")
+	}
+	if *do_gatt || *do_arp {
+		neighs, err := netlink.NeighList(0, 0)
+		if err != nil {
+			fmt.Println("Error: ", err)
+		} else {
+			fmt.Printf("ARP table:")
+			for _, n := range neighs {
+				fmt.Printf("\n\tmac=%s ip=%s", n.HardwareAddr, n.IP)
+			}
+			fmt.Println("")
+		}
 	}
 }
