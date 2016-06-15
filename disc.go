@@ -87,20 +87,13 @@ type AVDiscoverer interface {
 }
 
 func (o OSSECAV) Paths() []string {
-	paths := []string{
+	return existingPaths([]string{
 		"/var/ossec",
-	}
-	found := []string{}
-	for _, path := range paths {
-		if _, err := os.Stat(path); err == nil {
-			found = append(found, path)
-		}
-	}
-	return found
+	})
 }
 
 func (o OSSECAV) Procs() []process {
-	return filterRunningProcs([]string{
+	return runningProcs([]string{
 		"ossec-agentd",
 		"ossec-syscheckd",
 	})
@@ -116,26 +109,43 @@ func (o OSSECAV) Name() string {
 }
 
 func (s SophosAV) Paths() []string {
-	return []string{}
-}
-
-func (s SophosAV) Procs() []process {
-	return filterRunningProcs([]string{
-		"savd",
-		"savscand",
+	return existingPaths([]string{
+		"/etc/init.d/sav-protect",
+		"/etc/init.d/sav-rms",
+		"/lib/systemd/system/sav-protect.service",
+		"/lib/systemd/system/sav-rms.service",
+		"/opt/sophos-av",
 	})
 }
 
-func (o SophosAV) Name() string {
-	return o.name
+func (s SophosAV) Procs() []process {
+	return runningProcs([]string{
+		"savd",
+		"savscand",
+	})
 }
 
 func (o SophosAV) KernelModules() []loadedKernelModule {
 	return []loadedKernelModule{}
 }
 
-// filterRunningProcs returns processes
-func filterRunningProcs(procs []string) []process {
+func (o SophosAV) Name() string {
+	return o.name
+}
+
+// existingPaths returns a subset of paths that exist on the filesystem.
+func existingPaths(paths []string) []string {
+	found := []string{}
+	for _, path := range paths {
+		if _, err := os.Stat(path); err == nil {
+			found = append(found, path)
+		}
+	}
+	return found
+}
+
+// runningProcs returns a subset of processes that are currently running.
+func runningProcs(procs []string) []process {
 	allProcs, _ := ps.Processes()
 	found := []process{}
 	for _, aproc := range allProcs {
