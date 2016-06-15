@@ -43,6 +43,7 @@ var (
 		SophosAV{name: "Sophos"},
 	}
 	AuditdRules = "/etc/audit/audit.rules"
+	UtmpPath    = "/var/run/utmp"
 )
 
 type privateKey struct {
@@ -257,7 +258,7 @@ func getArp() []netlink.Neigh {
 
 func getWho() []who {
 	found := []who{}
-	utmps, err := utmp.ReadUtmp("/var/run/utmp", utmp.LoginProcess)
+	utmps, err := utmp.ReadUtmp(UtmpPath, utmp.LoginProcess)
 	if err != nil {
 		return found
 	}
