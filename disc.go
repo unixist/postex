@@ -246,6 +246,15 @@ func isContainer() bool {
 	return false
 }
 
+func getArp() []netlink.Neigh {
+	neighs, err := netlink.NeighList(0, 0)
+	if err != nil {
+		return []netlink.Neigh{}
+	} else {
+		return neighs
+	}
+}
+
 func getWho() []who {
 	found := []who{}
 	utmps, err := utmp.ReadUtmp("/var/run/utmp", utmp.LoginProcess)
@@ -357,16 +366,11 @@ func main() {
 		fmt.Println("")
 	}
 	if *do_gatt || *do_arp {
-		neighs, err := netlink.NeighList(0, 0)
-		if err != nil {
-			fmt.Println("Error: ", err)
-		} else {
-			fmt.Printf("ARP table:")
-			for _, n := range neighs {
-				fmt.Printf("\n\tmac=%s ip=%s", n.HardwareAddr, n.IP)
-			}
-			fmt.Println("")
+		fmt.Printf("ARP table:")
+		for _, arp := range getArp() {
+			fmt.Printf("\n\tmac=%s ip=%s", arp.HardwareAddr, arp.IP)
 		}
+		fmt.Println("")
 	}
 	if *do_gatt || *do_who {
 		fmt.Printf("Logged in:")
