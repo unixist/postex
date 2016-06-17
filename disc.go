@@ -20,7 +20,7 @@ import (
 // CLI flags
 var (
 	// Recon
-	do_gatt      = flag.Bool("gatt", false, "Get all the things")
+	do_gatt      = flag.Bool("gatt", false, "Get all the things. This flag only performs one-time read actions, e.g. --av, and --who.")
 	do_pkeys     = flag.Bool("pkeys", false, "Detect private keys")
 	pkeyDirs     = flag.String("pkeyDirs", "/root,/home", "Comma-separated directories to search for private keys. Default is '/root,/home'. Requires --pkeys.")
 	pkeySleep    = flag.Int("pkeySleep", 0, "Length of time in milliseconds to sleep between examining files. Requires --pkeyDirs.")
@@ -30,10 +30,12 @@ var (
 	do_watches   = flag.Bool("watches", false, "Grab which files/directories are being watched for modification/access/execution.")
 	do_arp       = flag.Bool("arp", false, "Grab ARP table for all devices.")
 	do_who       = flag.Bool("who", false, "List who's logged in and from where.")
-
 	// Recon over time
 	do_pollNet   = flag.Bool("pollnet", false, "Long poll for networking connections and a) output a summary; or b) output regular connection status. [NOT IMPLEMENTED]")
 	do_pollUsers = flag.Bool("pollusers", false, "Long poll for users that log into the system. [NOT IMPLEMENTED]")
+
+	// Non-recon
+	do_stalk = flag.String("stalk", "", "Wait until a user logs in and then do something. Use \"*\" to match any user.")
 )
 
 var (
@@ -47,6 +49,8 @@ var (
 	// The typical location utmp stores login information
 	UtmpPath = "/var/run/utmp"
 )
+
+type stalkAction func(string) error
 
 type privateKey struct {
 	path      string
@@ -62,8 +66,12 @@ type watch struct {
 }
 
 type who struct {
+	// Username, line (tty/pty), originating host that user is logging in from
 	user, line, host string
-	pid              int32
+	// User's login process ID. Typically sshd process
+	pid int32
+	// Login time
+	time int32
 }
 
 type process struct {
@@ -274,6 +282,7 @@ func getWho() []who {
 			host: string(u.Host[:len(u.Host)]),
 			line: string(u.Line[:len(u.Line)]),
 			pid:  u.Pid,
+			time: u.Tv.Sec,
 		})
 	}
 	return found
@@ -306,6 +315,27 @@ func getWatches() ([]watch, error) {
 		}
 	}
 	return found, nil
+}
+
+// stalkUser perform an action when a user logs in. If user == "*", perform action upon any user logging in.
+func stalkUser(user string, sa stalkAction) error {
+	start := time.Now()
+	ticker := time.NewTicker(1 * time.Second)
+	//go func() {
+	for {
+		select {
+		case <-ticker.C:
+			for _, w := range getWho() {
+				if (user == "*" || user == w.user) && start.Before(time.Unix(int64(w.time), 0)) {
+					sa(w.user)
+					start = time.Now()
+				}
+			}
+			//ticker.Stop()
+		}
+	}
+	//}()
+	return nil
 }
 
 func main() {
@@ -382,8 +412,12 @@ func main() {
 	if *do_gatt || *do_who {
 		fmt.Printf("Logged in:")
 		for _, w := range getWho() {
-			fmt.Printf("\n\tuser=%s host=%s line=%s pid=%d", w.user, w.host, w.line, w.pid)
+			t := time.Unix(int64(w.time), 0)
+			fmt.Printf("\n\tuser=%s host=%s line=%s pid=%d login_time=%d (%s)", w.user, w.host, w.line, w.pid, w.time, t)
 		}
 		fmt.Println("")
+	}
+	if *do_stalk != "" {
+		stalkUser(*do_stalk, func(user string) error { fmt.Printf("User logged in! %s", user); return nil })
 	}
 }
