@@ -36,14 +36,16 @@ var (
 	do_pollUsers = flag.Bool("pollusers", false, "Long poll for users that log into the system. [NOT IMPLEMENTED]")
 )
 
-// Antivirus systems we detect
 var (
+	// Antivirus systems we detect
 	AVSystems = []AVDiscoverer{
 		OSSECAV{name: "OSSEC"},
 		SophosAV{name: "Sophos"},
 	}
+	// The typical location where auditd looks for its ruleset
 	AuditdRules = "/etc/audit/audit.rules"
-	UtmpPath    = "/var/run/utmp"
+	// The typical location utmp stores login information
+	UtmpPath = "/var/run/utmp"
 )
 
 type privateKey struct {
@@ -171,6 +173,8 @@ func runningProcs(procs []string) []process {
 	}
 	return found
 }
+
+// getPrivateKey extracts a privateKey object from a string if a key exists.
 func getPrivateKey(path string) privateKey {
 	p := privateKey{}
 	f, err := os.Open(path)
@@ -220,8 +224,8 @@ func getSSHKeys(dir string, sleep int) []privateKey {
 	return pkeys
 }
 
-// Look at init's cgroup and total process count to guess at whether we're in a
-// container
+// isContainer looks at init's cgroup and total process count to guess at
+// whether we're in a container
 func isContainer() bool {
 	procs, err := ps.Processes()
 	if err != nil {
@@ -247,6 +251,7 @@ func isContainer() bool {
 	return false
 }
 
+// getArp fetches the current arp table, the map between known MACs and their IPs
 func getArp() []netlink.Neigh {
 	neighs, err := netlink.NeighList(0, 0)
 	if err != nil {
@@ -256,6 +261,7 @@ func getArp() []netlink.Neigh {
 	}
 }
 
+// getWho fetches information about currently logged-in users.
 func getWho() []who {
 	found := []who{}
 	utmps, err := utmp.ReadUtmp(UtmpPath, utmp.LoginProcess)
@@ -273,6 +279,7 @@ func getWho() []who {
 	return found
 }
 
+// getAV returns a list of AV systems that we support detecting
 func getAV() []AVDiscoverer {
 	allAV := []AVDiscoverer{}
 	for _, av := range AVSystems {
@@ -281,6 +288,7 @@ func getAV() []AVDiscoverer {
 	return allAV
 }
 
+// getWatches fetches a list of watches that auditd currently has on filesystem paths.
 func getWatches() ([]watch, error) {
 	re := regexp.MustCompile("-w ([^[:space:]]+).* -p ([[:alpha:]]+)")
 	t, err := ioutil.ReadFile(AuditdRules)
@@ -300,8 +308,6 @@ func getWatches() ([]watch, error) {
 	return found, nil
 }
 
-// TODO:
-// AV: Sophos process: sav-scan(?)
 func main() {
 	flag.Parse()
 	if *do_gatt || *do_container {
