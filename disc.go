@@ -22,7 +22,7 @@ var (
 	// Recon
 	do_gatt      = flag.Bool("gatt", false, "Get all the things")
 	do_pkeys     = flag.Bool("pkeys", false, "Detect private keys")
-	pkeyDirs     = flag.String("pkeyDirs", "/root,/home", "Comma-separated directories to search for private keys. Default is '/root,/home'. Requires --pkeyDirs.")
+	pkeyDirs     = flag.String("pkeyDirs", "/root,/home", "Comma-separated directories to search for private keys. Default is '/root,/home'. Requires --pkeys.")
 	pkeySleep    = flag.Int("pkeySleep", 0, "Length of time in milliseconds to sleep between examining files. Requires --pkeyDirs.")
 	do_av        = flag.Bool("av", false, "Check for signs of A/V services running or present.")
 	do_container = flag.Bool("container", false, "Detect if this system is running in a container.")
