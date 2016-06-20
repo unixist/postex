@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"flag"
 	"fmt"
 	"io/ioutil"
@@ -20,22 +21,22 @@ import (
 // CLI flags
 var (
 	// Recon
-	do_gatt      = flag.Bool("gatt", false, "Get all the things. This flag only performs one-time read actions, e.g. --av, and --who.")
-	do_pkeys     = flag.Bool("pkeys", false, "Detect private keys")
-	pkeyDirs     = flag.String("pkeyDirs", "/root,/home", "Comma-separated directories to search for private keys. Default is '/root,/home'. Requires --pkeys.")
-	pkeySleep    = flag.Int("pkeySleep", 0, "Length of time in milliseconds to sleep between examining files. Requires --pkeyDirs.")
-	do_av        = flag.Bool("av", false, "Check for signs of A/V services running or present.")
-	do_container = flag.Bool("container", false, "Detect if this system is running in a container.")
-	do_net       = flag.Bool("net", false, "Grab IPv4 and IPv6 networking connections.")
-	do_watches   = flag.Bool("watches", false, "Grab which files/directories are being watched for modification/access/execution.")
-	do_arp       = flag.Bool("arp", false, "Grab ARP table for all devices.")
-	do_who       = flag.Bool("who", false, "List who's logged in and from where.")
+	flag_gatt       = flag.Bool("gatt", false, "Get all the things. This flag only performs one-time read actions, e.g. --av, and --who.")
+	flag_pkeys      = flag.Bool("pkeys", false, "Detect private keys")
+	flag_pkey_dirs  = flag.String("flag_pkey_dirs", "/root,/home", "Comma-separated directories to search for private keys. Default is '/root,/home'. Requires --pkeys.")
+	flag_pkey_sleep = flag.Int("flag_pkey_sleep", 0, "Length of time in milliseconds to sleep between examining files. Requires --flag_pkey_dirs.")
+	flag_av         = flag.Bool("av", false, "Check for signs of A/V services running or present.")
+	flag_container  = flag.Bool("container", false, "Detect if this system is running in a container.")
+	flag_net        = flag.Bool("net", false, "Grab IPv4 and IPv6 networking connections.")
+	flag_watches    = flag.Bool("watches", false, "Grab which files/directories are being watched for modification/access/execution.")
+	flag_arp        = flag.Bool("arp", false, "Grab ARP table for all devices.")
+	flag_who        = flag.Bool("who", false, "List who's logged in and from where.")
 	// Recon over time
-	do_pollNet   = flag.Bool("pollnet", false, "Long poll for networking connections and a) output a summary; or b) output regular connection status. [NOT IMPLEMENTED]")
-	do_pollUsers = flag.Bool("pollusers", false, "Long poll for users that log into the system. [NOT IMPLEMENTED]")
+	flag_poll_net   = flag.Bool("pollnet", false, "Long poll for networking connections and a) output a summary; or b) output regular connection status. [NOT IMPLEMENTED]")
+	flag_poll_users = flag.Bool("pollusers", false, "Long poll for users that log into the system. [NOT IMPLEMENTED]")
 
 	// Non-recon
-	do_stalk = flag.String("stalk", "", "Wait until a user logs in and then do something. Use \"*\" to match any user.")
+	flag_stalk = flag.String("stalk", "", "Wait until a user logs in and then do something. Use \"*\" to match any user.")
 )
 
 var (
@@ -278,9 +279,9 @@ func getWho() []who {
 	}
 	for _, u := range utmps {
 		found = append(found, who{
-			user: string(u.User[:len(u.User)]),
-			host: string(u.Host[:len(u.Host)]),
-			line: string(u.Line[:len(u.Line)]),
+			user: string(bytes.Trim(u.User[:], "\x00")),
+			host: string(bytes.Trim(u.Host[:], "\x00")),
+			line: string(bytes.Trim(u.Line[:], "\x00")),
 			pid:  u.Pid,
 			time: u.Tv.Sec,
 		})
@@ -317,7 +318,8 @@ func getWatches() ([]watch, error) {
 	return found, nil
 }
 
-// stalkUser perform an action when a user logs in. If user == "*", perform action upon any user logging in.
+// stalkUser perform an action when a specific user logs in at any point in the future.
+// If user == "*", any user will trigger the action.
 func stalkUser(user string, sa stalkAction) error {
 	start := time.Now()
 	ticker := time.NewTicker(1 * time.Second)
@@ -340,19 +342,19 @@ func stalkUser(user string, sa stalkAction) error {
 
 func main() {
 	flag.Parse()
-	if *do_gatt || *do_container {
+	if *flag_gatt || *flag_container {
 		fmt.Printf("isContainer: %v\n", isContainer())
 	}
-	if *do_gatt || *do_pkeys {
+	if *flag_gatt || *flag_pkeys {
 		fmt.Printf("ssh keys:")
-		for _, dir := range strings.Split(*pkeyDirs, ",") {
-			for _, pkey := range getSSHKeys(dir, *pkeySleep) {
+		for _, dir := range strings.Split(*flag_pkey_dirs, ",") {
+			for _, pkey := range getSSHKeys(dir, *flag_pkey_sleep) {
 				fmt.Printf("\n\tfile=%v encrypted=%v", pkey.path, pkey.encrypted)
 			}
 		}
 		fmt.Println("")
 	}
-	if *do_gatt || *do_av {
+	if *flag_gatt || *flag_av {
 		fmt.Printf("AV:")
 		for _, av := range AVSystems {
 			name, paths, procs, mods := av.Name(), av.Paths(), av.Procs(), av.KernelModules()
@@ -362,7 +364,7 @@ func main() {
 		}
 		fmt.Println("")
 	}
-	if *do_gatt || *do_net {
+	if *flag_gatt || *flag_net {
 		fmt.Printf("ipv4 connections:")
 		for _, conn := range netstat.Tcp() {
 			if conn.State == "ESTABLISHED" {
@@ -390,7 +392,7 @@ func main() {
 		}
 		fmt.Println("")
 	}
-	if *do_gatt || *do_watches {
+	if *flag_gatt || *flag_watches {
 		fmt.Printf("Watches:")
 		watches, err := getWatches()
 		if err != nil {
@@ -402,14 +404,14 @@ func main() {
 		}
 		fmt.Println("")
 	}
-	if *do_gatt || *do_arp {
+	if *flag_gatt || *flag_arp {
 		fmt.Printf("ARP table:")
 		for _, arp := range getArp() {
 			fmt.Printf("\n\tmac=%s ip=%s", arp.HardwareAddr, arp.IP)
 		}
 		fmt.Println("")
 	}
-	if *do_gatt || *do_who {
+	if *flag_gatt || *flag_who {
 		fmt.Printf("Logged in:")
 		for _, w := range getWho() {
 			t := time.Unix(int64(w.time), 0)
@@ -417,7 +419,7 @@ func main() {
 		}
 		fmt.Println("")
 	}
-	if *do_stalk != "" {
-		stalkUser(*do_stalk, func(user string) error { fmt.Printf("User logged in! %s", user); return nil })
+	if *flag_stalk != "" {
+		stalkUser(*flag_stalk, func(user string) error { fmt.Printf("User logged in! %s", user); return nil })
 	}
 }
