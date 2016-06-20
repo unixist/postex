@@ -23,8 +23,8 @@ var (
 	// Recon
 	flag_gatt       = flag.Bool("gatt", false, "Get all the things. This flag only performs one-time read actions, e.g. --av, and --who.")
 	flag_pkeys      = flag.Bool("pkeys", false, "Detect private keys")
-	flag_pkey_dirs  = flag.String("flag_pkey_dirs", "/root,/home", "Comma-separated directories to search for private keys. Default is '/root,/home'. Requires --pkeys.")
-	flag_pkey_sleep = flag.Int("flag_pkey_sleep", 0, "Length of time in milliseconds to sleep between examining files. Requires --flag_pkey_dirs.")
+	flag_pkey_dirs  = flag.String("pkey-dirs", "/root,/home", "Comma-separated directories to search for private keys. Default is '/root,/home'. Requires --pkeys.")
+	flag_pkey_sleep = flag.Int("pkey-sleep", 0, "Length of time in milliseconds to sleep between examining files. Requires --flag_pkey_dirs.")
 	flag_av         = flag.Bool("av", false, "Check for signs of A/V services running or present.")
 	flag_container  = flag.Bool("container", false, "Detect if this system is running in a container.")
 	flag_net        = flag.Bool("net", false, "Grab IPv4 and IPv6 networking connections.")
@@ -53,7 +53,7 @@ var (
 
 type stalkAction func(string) error
 
-type privateKey struct {
+type sshPrivateKey struct {
 	path      string
 	encrypted bool
 }
@@ -183,9 +183,9 @@ func runningProcs(procs []string) []process {
 	return found
 }
 
-// getPrivateKey extracts a privateKey object from a string if a key exists.
-func getPrivateKey(path string) privateKey {
-	p := privateKey{}
+// getPrivateKey extracts a sshPrivateKey object from a string if a key exists.
+func getPrivateKey(path string) sshPrivateKey {
+	p := sshPrivateKey{}
 	f, err := os.Open(path)
 	// If we don't have permission to open the file, skip it.
 	if err != nil {
@@ -206,7 +206,7 @@ func getPrivateKey(path string) privateKey {
 	if err != nil {
 		return p
 	}
-	p = privateKey{
+	p = sshPrivateKey{
 		path:      path,
 		encrypted: strings.HasSuffix(line, "ENCRYPTED\n"),
 	}
@@ -215,8 +215,8 @@ func getPrivateKey(path string) privateKey {
 
 // getSSHKeys looks for readable ssh private keys. Optionally sleep for `sleep`
 // milliseconds to evade detection.
-func getSSHKeys(dir string, sleep int) []privateKey {
-	pkeys := []privateKey{}
+func getSSHKeys(dir string, sleep int) []sshPrivateKey {
+	pkeys := []sshPrivateKey{}
 	filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if sleep != 0 {
 			time.Sleep(time.Duration(sleep) * time.Millisecond)
@@ -225,7 +225,7 @@ func getSSHKeys(dir string, sleep int) []privateKey {
 			return nil
 		}
 		pkey := getPrivateKey(path)
-		if pkey != (privateKey{}) {
+		if pkey != (sshPrivateKey{}) {
 			pkeys = append(pkeys, pkey)
 		}
 		return nil
