@@ -316,12 +316,31 @@ func getWatches() ([]watch, error) {
 	return found, nil
 }
 
+func getSSHControlMasterFilename(user string) (string, error) {
+	u, err := osuser.Lookup(user)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s/.ssh/.config", u.HomeDir), nil
+}
+
 func getSSHConfigFilename(user string) (string, error) {
 	u, err := osuser.Lookup(user)
 	if err != nil {
 		return "", err
 	}
 	return fmt.Sprintf("%s/.ssh/config", u.HomeDir), nil
+}
+
+func isSSHControlMasterActive(user string) bool {
+	filename, _ := getSSHControlMasterFilename(user)
+	s, err := os.Stat(filename)
+	if err == nil {
+		if time.Since(s.ModTime()) < time.Duration(20*time.Minute) {
+			return true
+		}
+	}
+	return false
 }
 
 // setSSHControlMaster places a ControlMaster directive in the user's ssh config file.
