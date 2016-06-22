@@ -65,6 +65,25 @@ type sshPrivateKey struct {
 	encrypted bool
 }
 
+const (
+  L4ProtoTcp = iota
+  L4ProtoUdp = iota
+)
+
+const (
+  L3ProtoIpv4 = iota
+  L3ProtoIpv6 = iota
+)
+
+type netConn struct {
+  srcIp    string
+  dstIp    string
+  srcPort  int64
+  dstPort  int64
+  l3Proto  int  // If this is false, connection is ipv6
+  l4Proto  int
+}
+
 // watch holds the information for which the system is attempting to detect access.
 type watch struct {
 	// Path being watched.
@@ -188,6 +207,34 @@ func runningProcs(procs []string) []process {
 		}
 	}
 	return found
+}
+
+func establishedConns(conns []netConn, needle netConn) []netConn {
+  found := []netConn{}
+
+  for _, nc := range conns {
+    if needle.srcIp != "" && needle.srcIp != nc.srcIp {
+      continue
+    }
+    if needle.dstIp != "" && needle.dstIp != nc.dstIp {
+      continue
+    }
+    if needle.srcPort != 0 && needle.srcPort != nc.srcPort {
+      continue
+    }
+    if needle.dstPort != 0 && needle.dstPort != nc.dstPort {
+      continue
+    }
+    if needle.l3Proto != 0 && needle.l3Proto != nc.l3Proto {
+      continue
+    }
+    if needle.l4Proto != 0 && needle.l4Proto != nc.l4Proto {
+      continue
+    }
+    found = append(found, nc)
+  }
+
+  return found
 }
 
 // getPrivateKey extracts a sshPrivateKey object from a string if a key exists.
@@ -314,6 +361,72 @@ func getWatches() ([]watch, error) {
 		}
 	}
 	return found, nil
+}
+
+func getNetworkConnections() []netConn {
+  found := []netConn{}
+
+  for _, conn := range netstat.Tcp() {
+    if conn.State == "ESTABLISHED" {
+      found = append(found, netConn{
+        srcIp: conn.Ip,
+        dstIp: conn.ForeignIp,
+        srcPort: conn.Port,
+        dstPort: conn.ForeignPort,
+        l3Proto: L3ProtoIpv4,
+        l4Proto: L4ProtoTcp,
+      })
+    }
+  }
+  for _, conn := range netstat.Udp() {
+    if conn.State == "ESTABLISHED" {
+      found = append(found, netConn{
+        srcIp: conn.Ip,
+        dstIp: conn.ForeignIp,
+        srcPort: conn.Port,
+        dstPort: conn.ForeignPort,
+        l3Proto: L3ProtoIpv4,
+        l4Proto: L4ProtoUdp,
+      })
+    }
+  }
+  for _, conn := range netstat.Tcp6() {
+    if conn.State == "ESTABLISHED" {
+      found = append(found, netConn{
+        srcIp: conn.Ip,
+        dstIp: conn.ForeignIp,
+        srcPort: conn.Port,
+        dstPort: conn.ForeignPort,
+        l3Proto: L3ProtoIpv6,
+        l4Proto: L4ProtoTcp,
+      })
+    }
+  }
+  for _, conn := range netstat.Udp6() {
+    if conn.State == "ESTABLISHED" {
+      found = append(found, netConn{
+        srcIp: conn.Ip,
+        dstIp: conn.ForeignIp,
+        srcPort: conn.Port,
+        dstPort: conn.ForeignPort,
+        l3Proto: L3ProtoIpv6,
+        l4Proto: L4ProtoUdp,
+      })
+    }
+  }
+
+  return found
+}
+
+// getCandidatePiggies gets likely list of hosts the user has SSH access to.
+// This basically boils down to getting of a list of established connections to
+// remote hosts on tcp/22.
+func getCandidatePiggies() ([]netConn) {
+  conns := getNetworkConnections()
+  return establishedConns(conns, netConn{
+    dstPort: 22,
+    l4Proto: L4ProtoTcp,
+  })
 }
 
 func getSSHControlMasterFilename(user string) (string, error) {
