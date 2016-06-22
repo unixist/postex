@@ -339,6 +339,7 @@ func setSSHControlMaster(user string) error {
 		return err
 	}
 	// Either create the config file or append to it
+	// TODO: if the file is created, then unsetSSHControlMaster() should remove it.
 	f, err := os.OpenFile(filename, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0600)
 	if err != nil {
 		return err
