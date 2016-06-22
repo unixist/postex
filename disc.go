@@ -296,15 +296,6 @@ func getWho() []who {
 	return found
 }
 
-// getAV returns a list of AV systems that we support detecting
-func getAV() []AVDiscoverer {
-	allAV := []AVDiscoverer{}
-	for _, av := range AVSystems {
-		allAV = append(allAV, av)
-	}
-	return allAV
-}
-
 // getWatches fetches a list of watches that auditd currently has on filesystem paths.
 func getWatches() ([]watch, error) {
 	re := regexp.MustCompile("-w ([^[:space:]]+).* -p ([[:alpha:]]+)")
