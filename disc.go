@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io/ioutil"
@@ -117,18 +118,23 @@ type netConn struct {
 // watch holds the information for which the system is attempting to detect access.
 type watch struct {
 	// Path being watched.
-	path string
+	Path string
 	// Action the watch is looking for, i.e. read/write/execute. For example "wa" would detect file writes or appendages.
-	action string
+	Action string
 }
 
-type who struct {
+type Who struct {
 	// Username, line (tty/pty), originating host that user is logging in from
-	user, line, host string
+	User, Line, Host string
 	// User's login process ID. Typically sshd process
-	pid int32
+	Pid int32
 	// Login time
-	time int32
+	Time int32
+}
+
+type Output struct {
+	Name   string
+	Values []interface{}
 }
 
 type process struct {
@@ -361,7 +367,7 @@ func getArp() []netlink.Neigh {
 
 func isUserLoggedIn(user string) bool {
 	for _, w := range getWho() {
-		if w.user == user || user == "*" {
+		if w.User == user || user == "*" {
 			return true
 		}
 	}
@@ -369,19 +375,19 @@ func isUserLoggedIn(user string) bool {
 }
 
 // getWho fetches information about currently logged-in users.
-func getWho() []who {
-	found := []who{}
+func getWho() []Who {
+	found := []Who{}
 	utmps, err := utmp.ReadUtmp(UtmpPath, utmp.LoginProcess)
 	if err != nil {
 		return found
 	}
 	for _, u := range utmps {
-		found = append(found, who{
-			user: string(bytes.Trim(u.User[:], "\x00")),
-			host: string(bytes.Trim(u.Host[:], "\x00")),
-			line: string(bytes.Trim(u.Line[:], "\x00")),
-			pid:  u.Pid,
-			time: u.Tv.Sec,
+		found = append(found, Who{
+			User: string(bytes.Trim(u.User[:], "\x00")),
+			Host: string(bytes.Trim(u.Host[:], "\x00")),
+			Line: string(bytes.Trim(u.Line[:], "\x00")),
+			Pid:  u.Pid,
+			Time: u.Tv.Sec,
 		})
 	}
 	return found
@@ -399,8 +405,8 @@ func getWatches() ([]watch, error) {
 		matches := re.FindStringSubmatch(line)
 		if len(matches) == 3 {
 			found = append(found, watch{
-				path:   matches[1],
-				action: matches[2],
+				Path:   matches[1],
+				Action: matches[2],
 			})
 		}
 	}
@@ -864,9 +870,9 @@ func stalkLocalLogin(user string, action localLoginStalkAction) error {
 		select {
 		case <-ticker.C:
 			for _, w := range getWho() {
-				if (user == "*" || user == w.user) && start.Before(time.Unix(int64(w.time), 0)) {
-					action(w.user, netConn{
-						src: Host{ip: w.host},
+				if (user == "*" || user == w.User) && start.Before(time.Unix(int64(w.Time), 0)) {
+					action(w.User, netConn{
+						src: Host{ip: w.Host},
 					})
 					start = time.Now()
 				}
@@ -906,14 +912,14 @@ func attemptRemoteLogin(user string) map[string][]sshLoginSuccess {
 	fmt.Println(loggedIn)
 	for _, host := range hosts {
 		for _, login := range loggedIn {
-			if user == login.user || user == "*" {
+			if user == login.User || user == "*" {
 				// Look for an ssh-agent running under this login session
 				sockPath, err := sshLoginWithAgent(user, host)
 				if err == nil {
-					found[user] = append(found[login.user], sshLoginSuccess{
+					found[user] = append(found[login.User], sshLoginSuccess{
 						host: host,
 						sock: sockPath,
-						user: login.user,
+						user: login.User,
 					})
 				} else {
 					fmt.Println(err)
@@ -924,8 +930,21 @@ func attemptRemoteLogin(user string) map[string][]sshLoginSuccess {
 	return found
 }
 
+func prettyString(i interface{}) string {
+	p, err := json.MarshalIndent(i, "", "  ")
+	ret := ""
+	if err == nil {
+		ret = string(p)
+	} else {
+		ret = fmt.Sprintf("Error:", err.Error())
+	}
+	return ret
+}
+
 func main() {
 	flag.Parse()
+	output := []Output{}
+
 	if *flag_gatt || *flag_container {
 		fmt.Printf("isContainer: %v\n", isContainer())
 	}
@@ -952,56 +971,66 @@ func main() {
 		fmt.Printf("ipv4 connections:")
 		for _, conn := range netstat.Tcp() {
 			if conn.State == "ESTABLISHED" {
-				fmt.Printf("\n\t tcp4: %s:%d <> %s:%d", conn.Ip, conn.Port, conn.ForeignIp, conn.ForeignPort)
+				fmt.Println(prettyString(conn))
 			}
 		}
 		fmt.Println("")
 		for _, conn := range netstat.Udp() {
 			if conn.State == "ESTABLISHED" {
-				fmt.Printf("\n\t udp4: %s:%d <> %s:%d", conn.Ip, conn.Port, conn.ForeignIp, conn.ForeignPort)
+				fmt.Println(prettyString(conn))
 			}
 		}
 
 		fmt.Printf("\nipv6 connections:")
 		for _, conn := range netstat.Tcp6() {
 			if conn.State == "ESTABLISHED" {
-				fmt.Printf("\n\t tcp6: %s:%d <> %s:%d", conn.Ip, conn.Port, conn.ForeignIp, conn.ForeignPort)
+				fmt.Println(prettyString(conn))
 			}
 		}
 		fmt.Println("")
 		for _, conn := range netstat.Udp6() {
 			if conn.State == "ESTABLISHED" {
-				fmt.Printf("\n\t udp6: %s:%d <> %s:%d", conn.Ip, conn.Port, conn.ForeignIp, conn.ForeignPort)
+				fmt.Println(prettyString(conn))
 			}
 		}
-		fmt.Println("")
 	}
 	if *flag_gatt || *flag_watches {
-		fmt.Printf("Watches:")
 		watches, err := getWatches()
+		fmt.Println(watches)
+		var values []interface{} = make([]interface{}, len(watches))
 		if err != nil {
 			fmt.Println("Error checking watches: ", err)
 		} else {
-			for _, w := range watches {
-				fmt.Printf("\n\tpath=%v action=%v", w.path, w.action)
+			for i := range watches {
+				values[i] = watches[i]
 			}
+			output = append(output, Output{
+				Name:   "auditd watches",
+				Values: values,
+			})
 		}
-		fmt.Println("")
 	}
 	if *flag_gatt || *flag_arp {
-		fmt.Printf("ARP table:")
-		for _, arp := range getArp() {
-			fmt.Printf("\n\tmac=%s ip=%s", arp.HardwareAddr, arp.IP)
+		arp := getArp()
+		var values []interface{} = make([]interface{}, len(arp))
+		for i := range arp {
+			values[i] = arp[i]
 		}
-		fmt.Println("")
+		output = append(output, Output{
+			Name:   "ARP",
+			Values: values,
+		})
 	}
 	if *flag_gatt || *flag_who {
-		fmt.Printf("Logged in:")
-		for _, w := range getWho() {
-			t := time.Unix(int64(w.time), 0)
-			fmt.Printf("\n\tuser=%s host=%s line=%s pid=%d login_time=%d (%s)", w.user, w.host, w.line, w.pid, w.time, t)
+		who := getWho()
+		var values []interface{} = make([]interface{}, len(who))
+		for i := range who {
+			values[i] = who[i]
 		}
-		fmt.Println("")
+		output = append(output, Output{
+			Name:   "Who",
+			Values: values,
+		})
 	}
 	if *flag_stalk_luser != "" {
 		stalkLocalLogin(*flag_stalk_luser, func(user string, conn netConn) error {
@@ -1018,4 +1047,5 @@ func main() {
 	if *flag_rm_ssh_cm != "" {
 		unsetSSHControlMaster(*flag_rm_ssh_cm)
 	}
+	fmt.Println(prettyString(output))
 }
