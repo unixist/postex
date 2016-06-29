@@ -77,8 +77,8 @@ type localLoginStalkAction func(string, netConn) error
 type remoteLoginStalkAction func(string) map[string][]sshLoginSuccess
 
 type sshPrivateKey struct {
-	path      string
-	encrypted bool
+	Path      string
+	Encrypted bool
 }
 
 const (
@@ -146,6 +146,13 @@ type loadedKernelModule struct {
 	address string
 	size    int
 	name    string
+}
+
+type Av struct {
+	Paths         []string
+	Procs         []process
+	KernelModules []loadedKernelModule
+	Name          string
 }
 
 type OSSECAV struct {
@@ -303,29 +310,31 @@ func getPrivateKey(path string) sshPrivateKey {
 		return p
 	}
 	p = sshPrivateKey{
-		path:      path,
-		encrypted: strings.HasSuffix(line, "ENCRYPTED\n"),
+		Path:      path,
+		Encrypted: strings.HasSuffix(line, "ENCRYPTED\n"),
 	}
 	return p
 }
 
 // getSSHKeys looks for readable ssh private keys. Optionally sleep for `sleep`
 // milliseconds to evade detection.
-func getSSHKeys(dir string, sleep int) []sshPrivateKey {
+func getSSHKeys(dirs string, sleep int) []sshPrivateKey {
 	pkeys := []sshPrivateKey{}
-	filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
-		if sleep != 0 {
-			time.Sleep(time.Duration(sleep) * time.Millisecond)
-		}
-		if info == nil || !info.Mode().IsRegular() {
+	for _, dir := range strings.Split(*flag_pkey_dirs, ",") {
+		filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+			if sleep != 0 {
+				time.Sleep(time.Duration(sleep) * time.Millisecond)
+			}
+			if info == nil || !info.Mode().IsRegular() {
+				return nil
+			}
+			pkey := getPrivateKey(path)
+			if pkey != (sshPrivateKey{}) {
+				pkeys = append(pkeys, pkey)
+			}
 			return nil
-		}
-		pkey := getPrivateKey(path)
-		if pkey != (sshPrivateKey{}) {
-			pkeys = append(pkeys, pkey)
-		}
-		return nil
-	})
+		})
+	}
 	return pkeys
 }
 
@@ -931,6 +940,19 @@ func attemptRemoteLogin(user string) map[string][]sshLoginSuccess {
 	return found
 }
 
+func getAVs() []Av {
+	avs := []Av{}
+	for _, av := range AVSystems {
+		avs = append(avs, Av{
+			Name:          av.Name(),
+			Paths:         av.Paths(),
+			Procs:         av.Procs(),
+			KernelModules: av.KernelModules(),
+		})
+	}
+	return avs
+}
+
 func prettyString(i interface{}) string {
 	p, err := json.MarshalIndent(i, "", "  ")
 	ret := ""
@@ -951,27 +973,32 @@ func main() {
 	}
 	if *flag_gatt || *flag_pkeys {
 		fmt.Printf("ssh keys:")
-		for _, dir := range strings.Split(*flag_pkey_dirs, ",") {
-			for _, pkey := range getSSHKeys(dir, *flag_pkey_sleep) {
-				fmt.Printf("\n\tfile=%v encrypted=%v", pkey.path, pkey.encrypted)
-			}
+		keys := getSSHKeys(*flag_pkey_dirs, *flag_pkey_sleep)
+		var values []interface{} = make([]interface{}, len(keys))
+		for i := range keys {
+			values[i] = keys[i]
 		}
-		fmt.Println("")
+		output = append(output, Output{
+			Name:   "SSH Keys",
+			Values: values,
+		})
 	}
 	if *flag_gatt || *flag_av {
-		fmt.Printf("AV:")
-		for _, av := range AVSystems {
-			name, paths, procs, mods := av.Name(), av.Paths(), av.Procs(), av.KernelModules()
-			if len(paths) > 0 || len(procs) > 0 {
-				fmt.Printf("\n\tname=%s files=%v procs=%v, modules=%v", name, paths, procs, mods)
-			}
+		avs := getAVs()
+		var values []interface{} = make([]interface{}, len(avs))
+		for i := range avs {
+			values[i] = avs[i]
 		}
-		fmt.Println("")
+		output = append(output, Output{
+			Name:   "Antivirus",
+			Values: values,
+		})
 	}
 	if *flag_gatt || *flag_net {
 		conns := []netstat.Process{}
 		wg := sync.WaitGroup{}
 		l := sync.Mutex{}
+
 		wg.Add(1)
 		go func() {
 			tcp4 := netstat.Tcp()
@@ -984,6 +1011,7 @@ func main() {
 			l.Unlock()
 			wg.Done()
 		}()
+
 		wg.Add(1)
 		go func() {
 			udp4 := netstat.Udp()
@@ -996,6 +1024,7 @@ func main() {
 			l.Unlock()
 			wg.Done()
 		}()
+
 		wg.Add(1)
 		go func() {
 			tcp6 := netstat.Tcp6()
@@ -1008,6 +1037,7 @@ func main() {
 			l.Unlock()
 			wg.Done()
 		}()
+
 		wg.Add(1)
 		go func() {
 			udp6 := netstat.Udp6()
@@ -1020,6 +1050,7 @@ func main() {
 			l.Unlock()
 			wg.Done()
 		}()
+
 		wg.Wait()
 
 		var values []interface{} = make([]interface{}, len(conns))
