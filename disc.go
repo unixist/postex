@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -968,35 +969,70 @@ func main() {
 		fmt.Println("")
 	}
 	if *flag_gatt || *flag_net {
-		fmt.Printf("ipv4 connections:")
-		for _, conn := range netstat.Tcp() {
-			if conn.State == "ESTABLISHED" {
-				fmt.Println(prettyString(conn))
+		conns := []netstat.Process{}
+		wg := sync.WaitGroup{}
+		l := sync.Mutex{}
+		wg.Add(1)
+		go func() {
+			tcp4 := netstat.Tcp()
+			l.Lock()
+			for _, conn := range tcp4 {
+				if conn.State == "ESTABLISHED" {
+					conns = append(conns, conn)
+				}
 			}
-		}
-		fmt.Println("")
-		for _, conn := range netstat.Udp() {
-			if conn.State == "ESTABLISHED" {
-				fmt.Println(prettyString(conn))
+			l.Unlock()
+			wg.Done()
+		}()
+		wg.Add(1)
+		go func() {
+			udp4 := netstat.Udp()
+			l.Lock()
+			for _, conn := range udp4 {
+				if conn.State == "ESTABLISHED" {
+					conns = append(conns, conn)
+				}
 			}
-		}
+			l.Unlock()
+			wg.Done()
+		}()
+		wg.Add(1)
+		go func() {
+			tcp6 := netstat.Tcp6()
+			l.Lock()
+			for _, conn := range tcp6 {
+				if conn.State == "ESTABLISHED" {
+					conns = append(conns, conn)
+				}
+			}
+			l.Unlock()
+			wg.Done()
+		}()
+		wg.Add(1)
+		go func() {
+			udp6 := netstat.Udp6()
+			l.Lock()
+			for _, conn := range udp6 {
+				if conn.State == "ESTABLISHED" {
+					conns = append(conns, conn)
+				}
+			}
+			l.Unlock()
+			wg.Done()
+		}()
+		wg.Wait()
 
-		fmt.Printf("\nipv6 connections:")
-		for _, conn := range netstat.Tcp6() {
-			if conn.State == "ESTABLISHED" {
-				fmt.Println(prettyString(conn))
-			}
+		var values []interface{} = make([]interface{}, len(conns))
+		for i := range conns {
+			values[i] = conns[i]
 		}
-		fmt.Println("")
-		for _, conn := range netstat.Udp6() {
-			if conn.State == "ESTABLISHED" {
-				fmt.Println(prettyString(conn))
-			}
-		}
+		output = append(output, Output{
+			Name:   "Network connections",
+			Values: values,
+		})
 	}
 	if *flag_gatt || *flag_watches {
 		watches, err := getWatches()
-		fmt.Println(watches)
 		var values []interface{} = make([]interface{}, len(watches))
 		if err != nil {
 			fmt.Println("Error checking watches: ", err)
