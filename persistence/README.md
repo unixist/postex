@@ -1,6 +1,6 @@
 ## malwhere
 
-Lightweight backdoor that operates in the kernel. Its use is for system reentrance when a) primary persistence mechanism is discovered; or b) [this is is the primary persistence mechanism](https://www.youtube.com/watch?v=qmJ2GVOEVFI).
+Lightweight backdoor that operates in the kernel. There is no expectation of userspace component. Its use is for system reentrance when a) primary persistence mechanism is discovered; or b) [this is is the primary persistence mechanism](https://www.youtube.com/watch?v=qmJ2GVOEVFI).
 
 ##overview
 It exposes a simple interface to the network via a netfilter hook. The idea is to support a few tactical operations and nothing more.
