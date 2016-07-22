@@ -1,7 +1,7 @@
 Linux postexploitation tool for discovery, backdooring, and lateral movement.
 
 ##goals
-* run independently of the host environment (no dependence existing executable utilities required, e.g. python, ruby, find)
+* run independently of the host environment (no dependence on existing executable utilities, e.g. python, ruby, find)
 * run with minimal liklihood of detection (no execution of potentially detectable commands, e.g. netstat, lsof, who)
 * run fast (parallelized native code)
 
@@ -13,8 +13,8 @@ Linux postexploitation tool for discovery, backdooring, and lateral movement.
 * serialize discovery data as JSON for easy consumption later 
 
 ## backdoor
-* &lt;none yet implemented&gt;
+* modify user's ssh config to force user to enable connection sharing (ControlMaster) when ssh'ing to remote hosts
 
 ## lateral movement
-* Piggy back on existing ssh connection via forwarded ssh credentials (ssh-agent reuse)
-* Backdoor user's ssh config to force user to create a control channel when ssh'ing to remote hosts (ssh connection reuse)
+* piggy back on forwarded ssh credentials (ssh-agent reuse)
+* piggy back on existing ssh connections that have connection sharing enabled (ssh connection reuse)
