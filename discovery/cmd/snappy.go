@@ -61,7 +61,7 @@ func main() {
 		gwg.Add(1)
 		go func() {
 			if *flag_verbose {
-				fmt.Println("Checking whether in a container")
+				fmt.Println("Looking for signs of containment")
 			}
 			is := disc.IsContainer()
 			var values []interface{} = make([]interface{}, 1)
@@ -74,13 +74,16 @@ func main() {
 			})
 			gl.Unlock()
 			gwg.Done()
+			if *flag_verbose {
+				fmt.Println("Finished looking for signs of containment")
+			}
 		}()
 	}
 	if *flag_gatt || *flag_pkeys {
 		gwg.Add(1)
 		go func() {
 			if *flag_verbose {
-				fmt.Println("Looking for private keys in %v", *flag_pkey_dirs)
+				fmt.Printf("Looking for private keys in %v\n", *flag_pkey_dirs)
 			}
 			keys := disc.GetSSHKeys(*flag_pkey_dirs, *flag_pkey_sleep)
 			var values []interface{} = make([]interface{}, len(keys))
@@ -95,6 +98,9 @@ func main() {
 			})
 			gl.Unlock()
 			gwg.Done()
+			if *flag_verbose {
+				fmt.Println("Finished looking for private keys")
+			}
 		}()
 	}
 	if *flag_gatt || *flag_av {
@@ -105,7 +111,7 @@ func main() {
 				for _, av := range disc.AVSystems {
 					avs = append(avs, av.Name())
 				}
-				fmt.Println("Looking for AV systems: %s", strings.Join(avs, ","))
+				fmt.Printf("Looking for AV systems: %s\n", strings.Join(avs, ","))
 			}
 			avs := disc.GetAV()
 			var values []interface{} = make([]interface{}, len(avs))
@@ -120,12 +126,18 @@ func main() {
 			})
 			gl.Unlock()
 			gwg.Done()
+			if *flag_verbose {
+				fmt.Println("Finished looking for AV systems")
+			}
 		}()
 	}
 	if *flag_gatt || *flag_net {
 		// Add to the global wait group just once
 		gwg.Add(1)
 		go func() {
+			if *flag_verbose {
+				fmt.Println("Looking for network connections")
+			}
 			conns := []netstat.Process{}
 			// Create a separate wait group for gathering the separate types of network connections
 			nwg := sync.WaitGroup{}
@@ -197,18 +209,24 @@ func main() {
 			})
 			gl.Unlock()
 			gwg.Done()
+			if *flag_verbose {
+				fmt.Println("Finished looking for network connections")
+			}
 		}()
 	}
 	if *flag_gatt || *flag_watches {
 		gwg.Add(1)
 		go func() {
+			if *flag_verbose {
+				fmt.Println("Looking for audit watches")
+			}
 			watches, err := disc.GetAuditWatches()
 			var values []interface{} = make([]interface{}, len(watches))
 			if err != nil {
 				// Only display the flag if watches were requested explicitly
 				// or verbosit was requested.
 				if *flag_watches || *flag_verbose {
-					fmt.Println("Error checking watches: ", err)
+					fmt.Println("\tError looking for audit watches: ", err)
 				}
 			} else {
 				for i := range watches {
@@ -223,11 +241,17 @@ func main() {
 				gl.Unlock()
 			}
 			gwg.Done()
+			if *flag_verbose {
+				fmt.Println("Finished looking for audit watches")
+			}
 		}()
 	}
 	if *flag_gatt || *flag_arp {
 		gwg.Add(1)
 		go func() {
+			if *flag_verbose {
+				fmt.Println("Looking for ARP cache")
+			}
 			arp := disc.GetArp()
 			var values []interface{} = make([]interface{}, len(arp))
 			for i := range arp {
@@ -241,11 +265,17 @@ func main() {
 			})
 			gl.Unlock()
 			gwg.Done()
+			if *flag_verbose {
+				fmt.Println("Finished looking for ARP cache")
+			}
 		}()
 	}
 	if *flag_gatt || *flag_who {
 		gwg.Add(1)
 		go func() {
+			if *flag_verbose {
+				fmt.Println("Looking for logged-in users")
+			}
 			who := disc.GetWho()
 			var values []interface{} = make([]interface{}, len(who))
 			for i := range who {
@@ -259,6 +289,9 @@ func main() {
 			})
 			gl.Unlock()
 			gwg.Done()
+			if *flag_verbose {
+				fmt.Println("Finished looking for logged-in users")
+			}
 		}()
 	}
 	if *flag_stalk_luser != "" {
@@ -278,7 +311,8 @@ func main() {
 	}
 
 	if *flag_verbose {
-		fmt.Println("Waiting for all discoveries to complete")
+		fmt.Println("Waiting for all discoveries to complete\n" +
+			"---------------------------------------")
 	}
 	gwg.Wait()
 	fmt.Println(prettyString(output))
