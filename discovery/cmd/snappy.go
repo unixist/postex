@@ -4,11 +4,11 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	netstat "github.com/drael/GOnetstat"
-	ps "github.com/unixist/go-ps"
 	disc "github.com/unixist/postex/discovery"
 )
 
@@ -36,6 +36,8 @@ var (
 	// Active - lateral movement
 	flag_stalk_ruser     = flag.String("stalk-ruser", "", "Wait until a user logs in locally and attempt to also log into that host.")
 	flag_stalk_ruser_cmd = flag.String("stalk-ruser-cmd", "", "Command to execute on remote host after successful login.")
+
+	flag_verbose = flag.Bool("verbose", false, "Print status information")
 )
 
 func prettyString(i interface{}) string {
@@ -52,143 +54,212 @@ func prettyString(i interface{}) string {
 func main() {
 	flag.Parse()
 	output := []disc.Output{}
+	gwg := sync.WaitGroup{}
+	gl := sync.Mutex{}
 
 	if *flag_gatt || *flag_container {
-		is := disc.IsContainer()
-		var values []interface{} = make([]interface{}, 1)
-		values[0] = is
-		output = append(output, disc.Output{
-			Name:   "In Container",
-			Values: values,
-		})
-	}
-	if *flag_gatt || *flag_pkeys {
-		fmt.Printf("ssh keys:")
-		keys := disc.GetSSHKeys(*flag_pkey_dirs, *flag_pkey_sleep)
-		var values []interface{} = make([]interface{}, len(keys))
-		for i := range keys {
-			values[i] = keys[i]
-		}
-		output = append(output, disc.Output{
-			Name:   "SSH Keys",
-			Values: values,
-		})
-	}
-	if *flag_gatt || *flag_av {
-		avs := disc.GetAV()
-		var values []interface{} = make([]interface{}, len(avs))
-		for i := range avs {
-			values[i] = avs[i]
-		}
-		output = append(output, disc.Output{
-			Name:   "Antivirus",
-			Values: values,
-		})
-	}
-	if *flag_gatt || *flag_net {
-		conns := []netstat.Process{}
-		wg := sync.WaitGroup{}
-		l := sync.Mutex{}
-
-		wg.Add(1)
+		gwg.Add(1)
 		go func() {
-			tcp4 := netstat.Tcp()
-			l.Lock()
-			for _, conn := range tcp4 {
-				if conn.State == "ESTABLISHED" {
-					conns = append(conns, conn)
-				}
+			if *flag_verbose {
+				fmt.Println("Checking whether in a container")
 			}
-			l.Unlock()
-			wg.Done()
-		}()
+			is := disc.IsContainer()
+			var values []interface{} = make([]interface{}, 1)
+			values[0] = is
 
-		wg.Add(1)
-		go func() {
-			udp4 := netstat.Udp()
-			l.Lock()
-			for _, conn := range udp4 {
-				if conn.State == "ESTABLISHED" {
-					conns = append(conns, conn)
-				}
-			}
-			l.Unlock()
-			wg.Done()
-		}()
-
-		wg.Add(1)
-		go func() {
-			tcp6 := netstat.Tcp6()
-			l.Lock()
-			for _, conn := range tcp6 {
-				if conn.State == "ESTABLISHED" {
-					conns = append(conns, conn)
-				}
-			}
-			l.Unlock()
-			wg.Done()
-		}()
-
-		wg.Add(1)
-		go func() {
-			udp6 := netstat.Udp6()
-			l.Lock()
-			for _, conn := range udp6 {
-				if conn.State == "ESTABLISHED" {
-					conns = append(conns, conn)
-				}
-			}
-			l.Unlock()
-			wg.Done()
-		}()
-
-		wg.Wait()
-
-		var values []interface{} = make([]interface{}, len(conns))
-		for i := range conns {
-			values[i] = conns[i]
-		}
-		output = append(output, disc.Output{
-			Name:   "Network connections",
-			Values: values,
-		})
-	}
-	if *flag_gatt || *flag_watches {
-		watches, err := disc.GetAuditWatches()
-		var values []interface{} = make([]interface{}, len(watches))
-		if err != nil {
-			fmt.Println("Error checking watches: ", err)
-		} else {
-			for i := range watches {
-				values[i] = watches[i]
-			}
+			gl.Lock()
 			output = append(output, disc.Output{
-				Name:   "auditd watches",
+				Name:   "In Container",
 				Values: values,
 			})
-		}
+			gl.Unlock()
+			gwg.Done()
+		}()
+	}
+	if *flag_gatt || *flag_pkeys {
+		gwg.Add(1)
+		go func() {
+			if *flag_verbose {
+				fmt.Println("Looking for private keys in %v", *flag_pkey_dirs)
+			}
+			keys := disc.GetSSHKeys(*flag_pkey_dirs, *flag_pkey_sleep)
+			var values []interface{} = make([]interface{}, len(keys))
+			for i := range keys {
+				values[i] = keys[i]
+			}
+
+			gl.Lock()
+			output = append(output, disc.Output{
+				Name:   "SSH Keys",
+				Values: values,
+			})
+			gl.Unlock()
+			gwg.Done()
+		}()
+	}
+	if *flag_gatt || *flag_av {
+		gwg.Add(1)
+		go func() {
+			if *flag_verbose {
+				avs := []string{}
+				for _, av := range disc.AVSystems {
+					avs = append(avs, av.Name())
+				}
+				fmt.Println("Looking for AV systems: %s", strings.Join(avs, ","))
+			}
+			avs := disc.GetAV()
+			var values []interface{} = make([]interface{}, len(avs))
+			for i := range avs {
+				values[i] = avs[i]
+			}
+
+			gl.Lock()
+			output = append(output, disc.Output{
+				Name:   "Antivirus",
+				Values: values,
+			})
+			gl.Unlock()
+			gwg.Done()
+		}()
+	}
+	if *flag_gatt || *flag_net {
+		// Add to the global wait group just once
+		gwg.Add(1)
+		go func() {
+			conns := []netstat.Process{}
+			// Create a separate wait group for gathering the separate types of network connections
+			nwg := sync.WaitGroup{}
+			l := sync.Mutex{}
+
+			nwg.Add(1)
+			go func() {
+				tcp4 := netstat.Tcp()
+				l.Lock()
+				for _, conn := range tcp4 {
+					if conn.State == "ESTABLISHED" {
+						conns = append(conns, conn)
+					}
+				}
+				l.Unlock()
+				nwg.Done()
+			}()
+
+			nwg.Add(1)
+			go func() {
+				udp4 := netstat.Udp()
+				l.Lock()
+				for _, conn := range udp4 {
+					if conn.State == "ESTABLISHED" {
+						conns = append(conns, conn)
+					}
+				}
+				l.Unlock()
+				nwg.Done()
+			}()
+
+			nwg.Add(1)
+			go func() {
+				tcp6 := netstat.Tcp6()
+				l.Lock()
+				for _, conn := range tcp6 {
+					if conn.State == "ESTABLISHED" {
+						conns = append(conns, conn)
+					}
+				}
+				l.Unlock()
+				nwg.Done()
+			}()
+
+			nwg.Add(1)
+			go func() {
+				udp6 := netstat.Udp6()
+				l.Lock()
+				for _, conn := range udp6 {
+					if conn.State == "ESTABLISHED" {
+						conns = append(conns, conn)
+					}
+				}
+				l.Unlock()
+				nwg.Done()
+			}()
+
+			nwg.Wait()
+
+			var values []interface{} = make([]interface{}, len(conns))
+			for i := range conns {
+				values[i] = conns[i]
+			}
+
+			gl.Lock()
+			output = append(output, disc.Output{
+				Name:   "Network connections",
+				Values: values,
+			})
+			gl.Unlock()
+			gwg.Done()
+		}()
+	}
+	if *flag_gatt || *flag_watches {
+		gwg.Add(1)
+		go func() {
+			watches, err := disc.GetAuditWatches()
+			var values []interface{} = make([]interface{}, len(watches))
+			if err != nil {
+				// Only display the flag if watches were requested explicitly
+				// or verbosit was requested.
+				if *flag_watches || *flag_verbose {
+					fmt.Println("Error checking watches: ", err)
+				}
+			} else {
+				for i := range watches {
+					values[i] = watches[i]
+				}
+
+				gl.Lock()
+				output = append(output, disc.Output{
+					Name:   "auditd watches",
+					Values: values,
+				})
+				gl.Unlock()
+			}
+			gwg.Done()
+		}()
 	}
 	if *flag_gatt || *flag_arp {
-		arp := disc.GetArp()
-		var values []interface{} = make([]interface{}, len(arp))
-		for i := range arp {
-			values[i] = arp[i]
-		}
-		output = append(output, disc.Output{
-			Name:   "ARP",
-			Values: values,
-		})
+		gwg.Add(1)
+		go func() {
+			arp := disc.GetArp()
+			var values []interface{} = make([]interface{}, len(arp))
+			for i := range arp {
+				values[i] = arp[i]
+			}
+
+			gl.Lock()
+			output = append(output, disc.Output{
+				Name:   "ARP",
+				Values: values,
+			})
+			gl.Unlock()
+			gwg.Done()
+		}()
 	}
 	if *flag_gatt || *flag_who {
-		who := disc.GetWho()
-		var values []interface{} = make([]interface{}, len(who))
-		for i := range who {
-			values[i] = who[i]
-		}
-		output = append(output, disc.Output{
-			Name:   "Who",
-			Values: values,
-		})
+		gwg.Add(1)
+		go func() {
+			who := disc.GetWho()
+			var values []interface{} = make([]interface{}, len(who))
+			for i := range who {
+				values[i] = who[i]
+			}
+
+			gl.Lock()
+			output = append(output, disc.Output{
+				Name:   "Who",
+				Values: values,
+			})
+			gl.Unlock()
+			gwg.Done()
+		}()
 	}
 	if *flag_stalk_luser != "" {
 		disc.StalkLocalLogin(*flag_stalk_luser, func(user string, conn disc.NetConn) error {
@@ -206,9 +277,9 @@ func main() {
 		disc.UnsetSSHControlMaster(*flag_rm_ssh_cm)
 	}
 
-	procs, _ := ps.Processes()
-	for _, proc := range procs {
-		fmt.Println(proc.Executable())
+	if *flag_verbose {
+		fmt.Println("Waiting for all discoveries to complete")
 	}
+	gwg.Wait()
 	fmt.Println(prettyString(output))
 }
