@@ -10,7 +10,7 @@ Linux postexploitation tool for discovery, backdooring, and lateral movement.
 * ... do the above over a period of time to get a sense of how the machine is used and by whom
 * detect security controls: A/V & auditd rules
 * grab ssh keys
-* serialize discovery data as JSON for easy consumption later 
+* serialize discovery data as JSON for easy consumption later
 
 ## backdoor
 * modify user's ssh config to force user to enable connection sharing (ControlMaster) when ssh'ing to remote hosts
@@ -18,3 +18,75 @@ Linux postexploitation tool for discovery, backdooring, and lateral movement.
 ## lateral movement
 * piggy back on forwarded ssh credentials (ssh-agent reuse)
 * piggy back on existing ssh connections that have connection sharing enabled (ssh connection reuse)
+
+
+## examples
+### discovery
+* See who's logged in and what AV systems are in use:
+```bash
+>: go run snappy.go --av --who
+```
+```json
+[
+  {
+    "Name": "Antivirus",
+    "Values": [
+      {
+        "Paths": [
+          "/var/ossec"
+        ],
+        "Procs": [],
+        "KernelModules": [],
+        "Name": "OSSEC"
+      },
+      {
+        "Paths": [
+          "/etc/init.d/sav-protect",
+          "/etc/init.d/sav-rms",
+          "/lib/systemd/system/sav-protect.service",
+          "/lib/systemd/system/sav-rms.service"
+        ],
+        "Procs": [],
+        "KernelModules": [],
+        "Name": "Sophos"
+      },
+      {
+        "Paths": [
+          "/etc/tripwire",
+          "/usr/sbin/tripwire",
+          "/var/lib/tripwire"
+        ],
+        "Procs": [],
+        "KernelModules": [],
+        "Name": "Tripwire"
+      }
+    ]
+  },
+  {
+    "Name": "Who",
+    "Values": [
+      {
+        "User": "neo",
+        "Line": ":0",
+        "Host": ":0",
+        "Pid": 6348,
+        "Time": 1467851439
+      },
+      {
+        "User": "wrabbit",
+        "Line": "pts/4",
+        "Host": ":0",
+        "Pid": 31267,
+        "Time": 1467853536
+      },
+      {
+        "User": "morph",
+        "Line": "pts/15",
+        "Host": ":0",
+        "Pid": 31267,
+        "Time": 1467913627
+      }
+    ]
+  }
+]
+```
