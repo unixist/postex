@@ -22,46 +22,23 @@ Linux postexploitation tool for discovery, backdooring, and lateral movement.
 
 ## examples
 ### discovery
-* See who's logged in and what AV systems are in use:
+* See what AV systems we can detect:
+```bash
+>: go run snappy.go --av  | jq '.[] | select(.Name == "Antivirus")|.Values[].Name'
+"OSSEC"
+"Sophos"
+"Tripwire"
+"Samhain"
+>:
+```
+
+* See who's logged into the system and scope the JSON:
 ```bash
 >: go run snappy.go --av --who
 ```
 ```json
+>: go run snappy.go --who
 [
-  {
-    "Name": "Antivirus",
-    "Values": [
-      {
-        "Paths": [
-          "/var/ossec"
-        ],
-        "Procs": [],
-        "KernelModules": [],
-        "Name": "OSSEC"
-      },
-      {
-        "Paths": [
-          "/etc/init.d/sav-protect",
-          "/etc/init.d/sav-rms",
-          "/lib/systemd/system/sav-protect.service",
-          "/lib/systemd/system/sav-rms.service"
-        ],
-        "Procs": [],
-        "KernelModules": [],
-        "Name": "Sophos"
-      },
-      {
-        "Paths": [
-          "/etc/tripwire",
-          "/usr/sbin/tripwire",
-          "/var/lib/tripwire"
-        ],
-        "Procs": [],
-        "KernelModules": [],
-        "Name": "Tripwire"
-      }
-    ]
-  },
   {
     "Name": "Who",
     "Values": [
