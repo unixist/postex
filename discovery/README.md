@@ -23,7 +23,7 @@ Linux postexploitation tool for discovery, backdooring, and lateral movement.
 ## examples
 ### discovery
 * See what AV systems we can detect:
-```bash
+    ```bash
 >: go run snappy.go --av  | jq '.[] | select(.Name == "Antivirus")|.Values[].Name'
 "OSSEC"
 "Sophos"
@@ -33,10 +33,10 @@ Linux postexploitation tool for discovery, backdooring, and lateral movement.
 ```
 
 * See who's logged into the system and scope the JSON:
-```bash
+    ```bash
 >: go run snappy.go --av --who
 ```
-```json
+    ```json
 [
   {
     "Name": "Who",
