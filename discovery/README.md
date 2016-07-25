@@ -37,32 +37,32 @@ Linux postexploitation tool for discovery, backdooring, and lateral movement.
 >: go run snappy.go --av --who
 ```
     ```json
-[
-  {
-    "Name": "Who",
-    "Values": [
+    [
       {
-        "User": "neo",
-        "Line": ":0",
-        "Host": ":0",
-        "Pid": 6348,
-        "Time": 1467851439
-      },
-      {
-        "User": "wrabbit",
-        "Line": "pts/4",
-        "Host": ":0",
-        "Pid": 31267,
-        "Time": 1467853536
-      },
-      {
-        "User": "morph",
-        "Line": "pts/15",
-        "Host": ":0",
-        "Pid": 31267,
-        "Time": 1467913627
+        "Name": "Who",
+        "Values": [
+          {
+            "User": "neo",
+            "Line": ":0",
+            "Host": ":0",
+            "Pid": 6348,
+            "Time": 1467851439
+          },
+          {
+            "User": "wrabbit",
+            "Line": "pts/4",
+            "Host": ":0",
+            "Pid": 31267,
+            "Time": 1467853536
+          },
+          {
+            "User": "morph",
+            "Line": "pts/15",
+            "Host": ":0",
+            "Pid": 31267,
+            "Time": 1467913627
+          }
+        ]
       }
     ]
-  }
-]
 ```
