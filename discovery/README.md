@@ -37,7 +37,6 @@ Linux postexploitation tool for discovery, backdooring, and lateral movement.
 >: go run snappy.go --av --who
 ```
 ```json
->: go run snappy.go --who
 [
   {
     "Name": "Who",
