@@ -34,7 +34,7 @@ Linux postexploitation tool for discovery, backdooring, and lateral movement.
 
 * See who's logged into the system and scope the JSON:
     ```bash
->: go run snappy.go --av --who
+>: go run snappy.go --who
 ```
     ```json
     [
