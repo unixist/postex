@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -17,7 +18,7 @@ var (
 	// Passive recon
 	flag_gatt       = flag.Bool("gatt", false, "Get all the things. This flag only performs one-time read actions, e.g. --av, and --who.")
 	flag_pkeys      = flag.Bool("pkeys", false, "Detect private keys")
-	flag_pkey_dirs  = flag.String("pkey-dirs", "/root,/home", "Comma-separated directories to search for private keys. Default is '/root,/home'. Requires --pkeys.")
+	flag_pkey_dirs  = flag.String("pkey-dirs", "/root,/home", "Comma-separated directories to search for private keys. Requires --pkeys.")
 	flag_pkey_sleep = flag.Int("pkey-sleep", 0, "Length of time in milliseconds to sleep between examining files. Requires --flag_pkey_dirs.")
 	flag_av         = flag.Bool("av", false, "Check for signs of A/V services running or present.")
 	flag_container  = flag.Bool("container", false, "Detect if this system is running in a container. [UNRELIABLE]")
@@ -26,19 +27,26 @@ var (
 	flag_arp        = flag.Bool("arp", false, "Grab ARP table for all devices.")
 	flag_who        = flag.Bool("who", false, "List who's logged in and from where.")
 	// Passive recon over time
-	flag_poll_net    = flag.Bool("pollnet", false, "Long poll for networking connections and a) output a summary; or b) output regular connection status. [NOT IMPLEMENTED]")
-	flag_poll_users  = flag.Bool("pollusers", false, "Long poll for users that log into the system. [NOT IMPLEMENTED]")
+	flag_poll_net    = flag.Bool("poll-net", false, "Long poll for networking connections and a) output a summary; or b) output regular connection status. [NOT IMPLEMENTED]")
+	flag_poll_users  = flag.Bool("poll-users", false, "Long poll for users that log into the system. [NOT IMPLEMENTED]")
 	flag_stalk_luser = flag.String("stalk-luser", "", "Wait until a user logs in locally and log it. Use \"*\" to match any user.")
 
 	// Active - backdoor
 	flag_ssh_cm    = flag.String("ssh-cm", "", "Set user's $HOME/.ssh/config to include a ControlMaster directive for passwordless piggybacking.")
 	flag_rm_ssh_cm = flag.String("rm-ssh-cm", "", "Undo --ssh-cm. If the config file is empty after the undo, it will be removed.")
 	// Active - lateral movement
-	flag_stalk_ruser     = flag.String("stalk-ruser", "", "Wait until a user logs in locally and attempt to also log into that host.")
-	flag_stalk_ruser_cmd = flag.String("stalk-ruser-cmd", "", "Command to execute on remote host after successful login.")
+	flag_stalk_ruser                = flag.String("stalk-ruser", "", "Wait until a user logs in locally and attempt to also log into that host.")
+	flag_stalk_ruser_login_attempts = flag.Int("stalk-ruser-login-login-attempts", 2, "Only attempt to log into potential victim hosts this many times. Governs all login attempts, even for multiple users (when \"*\" is used).")
+	flag_stalk_ruser_poll_freq      = flag.Int("stalk-ruser-poll-freq", 10, "Frequency in seconds to inspect who's logged in.")
+	flag_stalk_ruser_cmd            = flag.String("stalk-ruser-cmd", "", "Command to execute on remote host after successful login.")
 
 	flag_verbose = flag.Bool("verbose", false, "Print status information")
 )
+
+func fatal(s string) {
+	fmt.Printf("Error: %s\n", s)
+	os.Exit(1)
+}
 
 func prettyString(i interface{}) string {
 	p, err := json.MarshalIndent(i, "", "  ")
@@ -294,6 +302,7 @@ func main() {
 			}
 		}()
 	}
+	gwg.Wait()
 	if *flag_stalk_luser != "" {
 		disc.StalkLocalLogin(*flag_stalk_luser, func(user string, conn disc.NetConn) error {
 			fmt.Printf("User logged in %v: %s@%s\n", time.Now(), user, conn.Src.Ip)
@@ -301,7 +310,18 @@ func main() {
 		})
 	}
 	if *flag_stalk_ruser != "" {
-		disc.StalkRemoteLogin(*flag_stalk_ruser, disc.AttemptRemoteLogin)
+		fmt.Println(*flag_stalk_ruser)
+		if *flag_stalk_ruser_login_attempts < 0 {
+			fatal("login attempts must be >= 0")
+		} else if *flag_stalk_ruser_poll_freq <= 0 {
+			fatal("poll frequency must be >= 1")
+		}
+		disc.StalkRemoteLogin(disc.StalkRemoteLoginParams{
+			Action:        disc.AttemptRemoteLogin,
+			LoginLimit:    uint(*flag_stalk_ruser_login_attempts),
+			PollFrequency: uint(*flag_stalk_ruser_poll_freq),
+			User:          *flag_stalk_ruser,
+		})
 	}
 	if *flag_ssh_cm != "" {
 		disc.SetSSHControlMaster(*flag_ssh_cm)
@@ -314,6 +334,7 @@ func main() {
 		fmt.Println("Waiting for all discoveries to complete\n" +
 			"---------------------------------------")
 	}
-	gwg.Wait()
-	fmt.Println(prettyString(output))
+	if len(output) != 0 {
+		fmt.Println(prettyString(output))
+	}
 }

