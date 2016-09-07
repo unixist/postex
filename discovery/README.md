@@ -1,7 +1,7 @@
 Linux postexploitation tool for discovery, backdooring, and lateral movement.
 
 ##goals
-* run independently of the host environment (no dependence on existing executable utilities, e.g. python, ruby, find)
+* run independently of the host environment (no dependence on existing executable utilities, e.g. python, ruby, find). Ideal for use in containers.
 * run with minimal liklihood of detection (no execution of potentially detectable commands, e.g. netstat, lsof, who)
 * run fast (parallelized native code)
 
