@@ -24,8 +24,8 @@ Linux postexploitation tool for discovery, backdooring, and lateral movement.
 ### discovery
 Here's how to use some of the discovery functions. If the system has the 'jq' utility, you can make queries easier and prettier.
 
-* See what AV systems we can detect:
-    ```bash
+#### See what AV the system is running:
+```bash
 >: go run snappy.go --av  | jq '.[] | select(.Name == "Antivirus")|.Values[].Name'
 "OSSEC"
 "Sophos"
@@ -34,11 +34,12 @@ Here's how to use some of the discovery functions. If the system has the 'jq' ut
 >:
 ```
 
-* See who's logged into the system and scope the JSON:
-    ```bash
+#### See who's logged into the system and scope the JSON:
+```bash
 >: go run snappy.go --who
 ```
-    ```json
+
+```json
     [
       {
         "Name": "Who",
@@ -69,11 +70,12 @@ Here's how to use some of the discovery functions. If the system has the 'jq' ut
     ]
 ```
 
-* See what ipv4/ipv6 connections are connecting to destination port 6697:
-    ```bash
+#### See what ipv4/ipv6 connections are connecting to destination port 6697:
+```bash
 >:go run snappy.go --net | jq '.[]|.Values[]|select(.ForeignPort == 6697)'
 ```
-    ```json
+
+```json
 {
   "User": "superman",
   "Name": "Hexchat",
