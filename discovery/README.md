@@ -73,7 +73,7 @@ Here's how to use some of the discovery functions. If the system has the 'jq' ut
     ```bash
 >:go run snappy.go --net | jq '.[]|.Values[]|select(.ForeignPort == 6697)'
 ```
-```json
+    ```json
 {
   "User": "superman",
   "Name": "Hexchat",
