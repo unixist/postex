@@ -22,6 +22,8 @@ Linux postexploitation tool for discovery, backdooring, and lateral movement.
 
 ## examples
 ### discovery
+Here's how to use some of the discovery functions. If the system has the 'jq' utility, you can make queries easier and prettier.
+
 * See what AV systems we can detect:
     ```bash
 >: go run snappy.go --av  | jq '.[] | select(.Name == "Antivirus")|.Values[].Name'
@@ -65,4 +67,33 @@ Linux postexploitation tool for discovery, backdooring, and lateral movement.
         ]
       }
     ]
+```
+
+* See what ipv4/ipv6 connections are connecting to destination port 6697:
+    ```bash
+>:go run snappy.go --net | jq '.[]|.Values[]|select(.ForeignPort == 6697)'
+```
+```json
+{
+  "User": "superman",
+  "Name": "Hexchat",
+  "Pid": "33097",
+  "Exe": "/usr/bin/hexchat",
+  "State": "ESTABLISHED",
+  "Ip": "192.168.0.99",
+  "Port": 59942,
+  "ForeignIp": "192.168.0.4",
+  "ForeignPort": 6697
+}
+{
+  "User": "superman",
+  "Name": "Hexchat",
+  "Pid": "33097",
+  "Exe": "/usr/bin/hexchat",
+  "State": "ESTABLISHED",
+  "Ip": "192.168.0.99",
+  "Port": 57556,
+  "ForeignIp": "192.168.0.4",
+  "ForeignPort": 6697
+}
 ```
