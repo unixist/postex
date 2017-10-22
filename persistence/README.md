@@ -1,6 +1,6 @@
 ## malwhere
 
-Lightweight backdoor that operates in the kernel. There is no expectation of a userspace component. Its use is for system reentrance when a) primary persistence mechanism is discovered; or b) [this is is the primary persistence mechanism](https://www.youtube.com/watch?v=qmJ2GVOEVFI).
+Lightweight backdoor that operates in the kernel. There is no expectation of a userspace component. Its use is for system re-entrance when a) primary persistence mechanism is discovered; or b) [this is is the primary persistence mechanism](https://www.youtube.com/watch?v=qmJ2GVOEVFI).
 
 ## overview
 It exposes a simple interface to the network via a netfilter hook. The idea is to support a few tactical operations and nothing more.
@@ -28,12 +28,12 @@ The current implementation expects a UDP packet that follows a simple protocol: 
 ## howtodetect
 * you'll have a tainted kernel if you "allow signed modules, but don't require them"
     * all legitimate kernel modules will need to be signed for an unsigned module to be noticed
-    * you still need to safely get the fact that the kernel is tainted off the system somehow
+    * you still need to safely (remotely) log the fact that the kernel is tainted somehow
     * the kernel can be tainted for reasons other than unsigned driver loading, so pay attention to the taint code
-* volatility can show you there's a netfilter hook in place. you probably aren't expecting any, so this is usually high signal.
-    * you can then reverse this piece of the module, but shouldn't be able to analyze the payload without the key
+* a tool like Volatility can show you there's a netfilter hook in place. You probably aren't expecting any, so this is usually high signal.
+    * you can then extract and reverse parts of the module, but shouldn't be able to analyze the payload without the key
 * unless something like diffie-hellmann is used for key exchange, you can capture the key over the network to decrypt payload
-    * so it still means you need memory dump & pcap to analyze the payload
+    * you still need a pcap and memory dump to decrypt and analyze the payload
     
 ## examples
 1. Add a public key to the root user's ```/root/.ssh/authorized_keys``` file.
