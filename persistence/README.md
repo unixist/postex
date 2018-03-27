@@ -41,5 +41,5 @@ The current implementation expects a UDP packet that follows a simple protocol: 
     ```bash
     # Current (decryption) key is ```97425196```. New (re-encryption) key becomes ```12341234```.
     # Get the decryption key wrong, and 95% chance the kernel will oops.
-    $ echo -n 'key:97425196:12341234:2' | | nc -u $host 8001
+    $ echo -n 'key:97425196:12341234:2' | nc -u $host 8001
     ```
